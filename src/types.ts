@@ -1,7 +1,7 @@
 export type FiringType = 'biscoito' | 'esmalte' | 'monoqueima' | 'terceira_queima';
 
-export type BiscoitoMethod = 'compartilhada' | 'meia_fornada' | 'fornada_inteira';
-export type EsmalteMethod = 'reserva_prateleira' | 'meia_fornada' | 'fornada_inteira';
+export type BiscoitoMethod = 'compartilhada' | 'reserva_prateleira' | 'meia_fornada' | 'fornada_inteira';
+export type EsmalteMethod = 'compartilhada' | 'reserva_prateleira' | 'meia_fornada' | 'fornada_inteira';
 
 export interface PieceDimensions {
   altura: number;

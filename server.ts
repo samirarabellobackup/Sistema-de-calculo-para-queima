@@ -34,30 +34,45 @@ interface DatabaseSchema {
 
 // Helper to load database
 function loadDb(): DatabaseSchema {
+  let db: DatabaseSchema = {
+    users: [],
+    orders: [],
+    notifications: []
+  };
+
   try {
     if (fs.existsSync(DB_FILE)) {
       const data = fs.readFileSync(DB_FILE, 'utf-8');
-      return JSON.parse(data);
+      db = JSON.parse(data);
     }
   } catch (err) {
     console.error('Error loading database:', err);
   }
-  // Default structure
-  const defaultDb: DatabaseSchema = {
-    users: [
-      {
-        id: 'admin-1',
-        nome: 'Administrador do Ateliê',
-        email: 'ollariaatelie@gmail.com',
-        senha: '2026adm', // Admin credentials
-        isAdmin: true
-      }
-    ],
-    orders: [],
-    notifications: []
-  };
-  fs.writeFileSync(DB_FILE, JSON.stringify(defaultDb, null, 2), 'utf-8');
-  return defaultDb;
+
+  // Ensure default admin user is always present and up to date
+  const adminEmail = 'ollariaatelie@gmail.com';
+  const adminPassword = 'admin1980';
+
+  if (!db.users) db.users = [];
+  if (!db.orders) db.orders = [];
+  if (!db.notifications) db.notifications = [];
+
+  const existingAdmin = db.users.find(u => u.email.toLowerCase() === adminEmail.toLowerCase());
+  if (existingAdmin) {
+    existingAdmin.senha = adminPassword;
+    existingAdmin.isAdmin = true;
+  } else {
+    db.users.push({
+      id: 'admin-1',
+      nome: 'Administrador do Ateliê',
+      email: adminEmail,
+      senha: adminPassword,
+      isAdmin: true
+    });
+  }
+
+  saveDb(db);
+  return db;
 }
 
 // Helper to save database
@@ -369,6 +384,202 @@ Responda rigorosamente com um objeto JSON válido contendo:
   } catch (error: any) {
     console.error('Error analyzing with Gemini:', error);
     return res.status(500).json({ error: 'Erro ao gerar análise técnica do Gemini.' });
+  }
+});
+
+// Parse PDF Order Endpoint (Extract pieces from previous PDF order)
+app.post('/api/parse-pdf-order', async (req, res) => {
+  const { pdfBase64, pdfText } = req.body;
+  if (!pdfBase64 && !pdfText) {
+    return res.status(400).json({ error: 'Nenhum conteúdo de PDF enviado.' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ error: 'Chave do Gemini API não configurada para análise de PDF.' });
+  }
+
+  try {
+    const contents: any[] = [];
+    if (pdfBase64) {
+      contents.push({
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: pdfBase64
+        }
+      });
+    } else if (pdfText) {
+      contents.push({ text: `Conteúdo extraído do PDF:\n${pdfText}` });
+    }
+
+    contents.push(`Você é um assistente do Ollaria Ateliê Cerâmico. Analise o orçamento/pedido em PDF fornecido e extraia a lista de todas as peças listadas com suas especificações técnicas e dimensões (altura, largura, profundidade em cm).
+
+Retorne ESTRITAMENTE um objeto JSON no formato:
+{
+  "pecas": [
+    {
+      "nome": "Nome do item/peça",
+      "tipo": "biscoito" | "esmalte" | "monoqueima" | "terceira_queima",
+      "metodo": "ajuste_inteligente" | "compartilhada" | "reserva_prateleira" | "meia_fornada" | "fornada_inteira",
+      "altura": number,
+      "largura": number,
+      "profundidade": number,
+      "detalhesTecnicos": {
+        "nacionalidadeMassa": "Nacional" | "Importada",
+        "marcaMassa": "string",
+        "tempMaximaQueima": number,
+        "tipoEsmalte": "reagente" | "estavel" | "mate" | "acetinado" | "brilho",
+        "marcaEsmalte": "string",
+        "tempMaximaEsmalte": number,
+        "quantasCamadas": number
+      },
+      "incluirDetalhes": boolean
+    }
+  ]
+}`);
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: contents,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['pecas'],
+          properties: {
+            pecas: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ['nome', 'tipo', 'metodo', 'altura', 'largura', 'profundidade'],
+                properties: {
+                  nome: { type: Type.STRING },
+                  tipo: { type: Type.STRING },
+                  metodo: { type: Type.STRING },
+                  altura: { type: Type.NUMBER },
+                  largura: { type: Type.NUMBER },
+                  profundidade: { type: Type.NUMBER },
+                  detalhesTecnicos: {
+                    type: Type.OBJECT,
+                    properties: {
+                      nacionalidadeMassa: { type: Type.STRING },
+                      marcaMassa: { type: Type.STRING },
+                      tempMaximaQueima: { type: Type.NUMBER },
+                      tipoEsmalte: { type: Type.STRING },
+                      marcaEsmalte: { type: Type.STRING },
+                      tempMaximaEsmalte: { type: Type.NUMBER },
+                      quantasCamadas: { type: Type.NUMBER }
+                    }
+                  },
+                  incluirDetalhes: { type: Type.BOOLEAN }
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || '{}');
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error('Error parsing PDF order with Gemini:', error);
+    return res.status(500).json({ error: 'Erro ao extrair peças do PDF via IA.' });
+  }
+});
+
+// Parse Text/WhatsApp Order Endpoint
+app.post('/api/parse-text-order', async (req, res) => {
+  const { text } = req.body;
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'Nenhum texto de orçamento fornecido.' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ error: 'Chave do Gemini API não configurada.' });
+  }
+
+  try {
+    const prompt = `Você é um assistente do Ollaria Ateliê Cerâmico.
+Analise a mensagem de texto/orçamento copiada a seguir e extraia todas as peças cerâmicas mencionadas com suas dimensões (altura, largura, profundidade em cm), tipo de queima e modalidade.
+
+Texto copiado:
+"""
+${text}
+"""
+
+Retorne ESTRITAMENTE um objeto JSON no formato:
+{
+  "pecas": [
+    {
+      "nome": "Nome da peça/item",
+      "tipo": "biscoito" | "esmalte" | "monoqueima" | "terceira_queima",
+      "metodo": "ajuste_inteligente" | "compartilhada" | "reserva_prateleira" | "meia_fornada" | "fornada_inteira",
+      "altura": number,
+      "largura": number,
+      "profundidade": number,
+      "detalhesTecnicos": {
+        "nacionalidadeMassa": "Nacional" | "Importada",
+        "marcaMassa": "string",
+        "tempMaximaQueima": number,
+        "tipoEsmalte": "reagente" | "estavel" | "mate" | "acetinado" | "brilho",
+        "marcaEsmalte": "string",
+        "tempMaximaEsmalte": number,
+        "quantasCamadas": number
+      },
+      "incluirDetalhes": boolean
+    }
+  ]
+}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['pecas'],
+          properties: {
+            pecas: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ['nome', 'tipo', 'metodo', 'altura', 'largura', 'profundidade'],
+                properties: {
+                  nome: { type: Type.STRING },
+                  tipo: { type: Type.STRING },
+                  metodo: { type: Type.STRING },
+                  altura: { type: Type.NUMBER },
+                  largura: { type: Type.NUMBER },
+                  profundidade: { type: Type.NUMBER },
+                  detalhesTecnicos: {
+                    type: Type.OBJECT,
+                    properties: {
+                      nacionalidadeMassa: { type: Type.STRING },
+                      marcaMassa: { type: Type.STRING },
+                      tempMaximaQueima: { type: Type.NUMBER },
+                      tipoEsmalte: { type: Type.STRING },
+                      marcaEsmalte: { type: Type.STRING },
+                      tempMaximaEsmalte: { type: Type.NUMBER },
+                      quantasCamadas: { type: Type.NUMBER }
+                    }
+                  },
+                  incluirDetalhes: { type: Type.BOOLEAN }
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || '{}');
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error('Error parsing text order with Gemini:', error);
+    return res.status(500).json({ error: 'Erro ao interpretar texto do orçamento via IA.' });
   }
 });
 

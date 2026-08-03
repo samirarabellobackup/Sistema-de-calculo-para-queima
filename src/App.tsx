@@ -27,7 +27,11 @@ import {
   Clock,
   Send,
   PlusCircle,
-  HelpCircle
+  HelpCircle,
+  Upload,
+  FileUp,
+  X,
+  Pencil
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { 
@@ -42,7 +46,7 @@ import {
   Pie, 
   Cell 
 } from 'recharts';
-import { FiringType, PieceItem, Order, User as UserType, NotificationItem } from './types';
+import { FiringType, BiscoitoMethod, PieceItem, Order, User as UserType, NotificationItem } from './types';
 import { KilnOptimizer, packPiecesOnShelves } from './components/KilnOptimizer';
 
 export default function App() {
@@ -81,7 +85,9 @@ export default function App() {
   const [piecesList, setPiecesList] = useState<PieceItem[]>([]);
   
   // App alerts / state
+  const [podeSobreporBiscoito, setPodeSobreporBiscoito] = useState<boolean>(true);
   const [aceitouDanosEsmalte, setAceitouDanosEsmalte] = useState<boolean>(false);
+  const [showTermosTecnicos, setShowTermosTecnicos] = useState<boolean>(false);
   const [showNotificationTray, setShowNotificationTray] = useState<boolean>(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [allOrders, setAllOrders] = useState<Order[]>([]);
@@ -105,6 +111,283 @@ export default function App() {
 
   // Admin filter & actions state
   const [adminFilterStatus, setAdminFilterStatus] = useState<string>('todos');
+
+  // Import states (PDF & Text/Message)
+  const [showImportPdfModal, setShowImportPdfModal] = useState<boolean>(false);
+  const [importTab, setImportTab] = useState<'text' | 'pdf'>('text');
+  const [pastedText, setPastedText] = useState<string>('');
+  const [isParsingPdf, setIsParsingPdf] = useState<boolean>(false);
+  const [pdfParseError, setPdfParseError] = useState<string | null>(null);
+  const [pdfParseSuccessMsg, setPdfParseSuccessMsg] = useState<string | null>(null);
+  const [parsedPiecesPreview, setParsedPiecesPreview] = useState<PieceItem[]>([]);
+  const [selectedPreviewIds, setSelectedPreviewIds] = useState<Set<string>>(new Set());
+
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setPastedText(text);
+        setPdfParseError(null);
+      }
+    } catch (e) {
+      console.warn('Não foi possível acessar a área de transferência diretamente:', e);
+      setPdfParseError('Não foi possível colar automaticamente. Use Ctrl+V para colar na caixa abaixo.');
+    }
+  };
+
+  const handleProcessTextMessage = async (textToParse: string) => {
+    const raw = (textToParse || pastedText || '').trim();
+    if (!raw) {
+      setPdfParseError('Por favor, cole a mensagem de texto do orçamento anterior.');
+      return;
+    }
+
+    setIsParsingPdf(true);
+    setPdfParseError(null);
+    setPdfParseSuccessMsg(null);
+    setParsedPiecesPreview([]);
+
+    try {
+      // 1. Try regex client-side parser first for fast matching of standard WhatsApp messages
+      const regexItems: PieceItem[] = [];
+      // Split text into item blocks
+      const blocks = raw.split(/(?=\n\s*\*?\d+\.|\n\s*•\s*Item:|\n\s*Peça\s*\d+:)/i);
+
+      for (let idx = 0; idx < blocks.length; idx++) {
+        const b = blocks[idx];
+        const dimsMatch = b.match(/(?:Medidas|Dimensões|Medida|Tamanho|AxLxP)?\s*:?\s*(\d+(?:[.,]\d+)?)\s*[xX*×]\s*(\d+(?:[.,]\d+)?)\s*[xX*×]\s*(\d+(?:[.,]\d+)?)/);
+        if (dimsMatch) {
+          const nameMatch = b.match(/(?:\d+\.\s*|\*\d+\.\s*|•\s*Item:\s*)([^\n*•]+)/i);
+          const name = nameMatch ? nameMatch[1].trim().replace(/^\*/, '').replace(/\*$/, '').trim() : `Peça ${regexItems.length + 1}`;
+          
+          const alt = parseFloat(dimsMatch[1].replace(',', '.'));
+          const larg = parseFloat(dimsMatch[2].replace(',', '.'));
+          const prof = parseFloat(dimsMatch[3].replace(',', '.'));
+          
+          let tipo: FiringType = 'biscoito';
+          if (/esmalte|esmalt|glaze/i.test(b)) tipo = 'esmalte';
+          else if (/monoqueima|mono/i.test(b)) tipo = 'monoqueima';
+          else if (/terceira/i.test(b)) tipo = 'terceira_queima';
+
+          let metodo: BiscoitoMethod = 'compartilhada';
+          if (/compartilhada/i.test(b)) metodo = 'compartilhada';
+          else if (/prateleira|reserva/i.test(b)) metodo = 'reserva_prateleira';
+          else if (/meia/i.test(b)) metodo = 'meia_fornada';
+          else if (/fornada\s*inteira/i.test(b)) metodo = 'fornada_inteira';
+
+          regexItems.push({
+            id: 'p-txt-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).substring(2, 5),
+            nome: name,
+            tipo: tipo,
+            metodo: metodo,
+            altura: alt,
+            largura: larg,
+            profundidade: prof,
+            volumeM3: (alt * larg * prof) / 1000000,
+            custoCalculado: 0,
+            incluirDetalhes: false
+          });
+        }
+      }
+
+      if (regexItems.length > 0) {
+        setParsedPiecesPreview(regexItems);
+        setSelectedPreviewIds(new Set(regexItems.map(p => p.id)));
+        setPdfParseSuccessMsg(`Mensagem interpretada com sucesso! Encontradas ${regexItems.length} peças com dimensões.`);
+        setIsParsingPdf(false);
+        return;
+      }
+
+      // 2. Fallback: Call Gemini AI API to parse any formatted text
+      const res = await fetch('/api/parse-text-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: raw })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Não foi possível interpretar o texto.');
+      }
+
+      if (data.pecas && Array.isArray(data.pecas) && data.pecas.length > 0) {
+        const formattedPieces: PieceItem[] = data.pecas.map((p: any, idx: number) => {
+          const alt = Number(p.altura) || 10;
+          const larg = Number(p.largura) || 10;
+          const prof = Number(p.profundidade) || 10;
+          const vol = (alt * larg * prof) / 1000000;
+          return {
+            id: 'p-txt-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).substring(2, 5),
+            nome: p.nome || `Peça ${idx + 1}`,
+            tipo: p.tipo || 'biscoito',
+            metodo: p.metodo || 'ajuste_inteligente',
+            altura: alt,
+            largura: larg,
+            profundidade: prof,
+            volumeM3: vol,
+            custoCalculado: 0,
+            detalhesTecnicos: p.detalhesTecnicos || undefined,
+            incluirDetalhes: !!p.incluirDetalhes
+          };
+        });
+
+        setParsedPiecesPreview(formattedPieces);
+        setSelectedPreviewIds(new Set(formattedPieces.map(p => p.id)));
+        setPdfParseSuccessMsg(`Análise de IA concluída com sucesso! Encontradas ${formattedPieces.length} peças no texto.`);
+      } else {
+        setPdfParseError('Nenhuma peça ou dimensão encontrada na mensagem colada. Verifique se o texto inclui o nome das peças e as medidas.');
+      }
+    } catch (err: any) {
+      console.error('Erro na leitura do texto:', err);
+      setPdfParseError(err.message || 'Erro ao processar a mensagem de texto.');
+    } finally {
+      setIsParsingPdf(false);
+    }
+  };
+
+  const handleProcessPdfFile = async (file: File) => {
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+      setPdfParseError('Por favor, selecione um arquivo de pedido no formato PDF (.pdf).');
+      return;
+    }
+
+    setIsParsingPdf(true);
+    setPdfParseError(null);
+    setPdfParseSuccessMsg(null);
+    setParsedPiecesPreview([]);
+
+    try {
+      // 1. First attempt: Read PDF binary/text to extract embedded OLLARIA_ORDER_DATA_V1 metadata
+      const textContent = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve((e.target?.result as string) || '');
+        reader.onerror = (e) => reject(e);
+        reader.readAsText(file, 'ISO-8859-1');
+      });
+
+      const match = textContent.match(/OLLARIA_ORDER_DATA_V1:([A-Za-z0-9+/=]+)/);
+      if (match && match[1]) {
+        try {
+          const jsonStr = decodeURIComponent(escape(atob(match[1])));
+          const data = JSON.parse(jsonStr);
+          if (data && Array.isArray(data.pieces) && data.pieces.length > 0) {
+            const formattedPieces: PieceItem[] = data.pieces.map((p: any, idx: number) => {
+              const alt = Number(p.altura) || 10;
+              const larg = Number(p.largura) || 10;
+              const prof = Number(p.profundidade) || 10;
+              const vol = (alt * larg * prof) / 1000000;
+              return {
+                id: 'p-imp-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).substring(2, 5),
+                nome: p.nome || `Peça ${idx + 1}`,
+                tipo: p.tipo || 'biscoito',
+                metodo: p.metodo || 'ajuste_inteligente',
+                altura: alt,
+                largura: larg,
+                profundidade: prof,
+                volumeM3: vol,
+                custoCalculado: 0,
+                detalhesTecnicos: p.detalhesTecnicos || undefined,
+                incluirDetalhes: !!p.incluirDetalhes
+              };
+            });
+
+            setParsedPiecesPreview(formattedPieces);
+            setSelectedPreviewIds(new Set(formattedPieces.map(p => p.id)));
+            setPdfParseSuccessMsg(`Verificação digital concluída! Encontradas ${formattedPieces.length} peças com especificações 100% exatas.`);
+            setIsParsingPdf(false);
+            return;
+          }
+        } catch (e) {
+          console.warn('Erro ao decodificar metadados diretos do PDF:', e);
+        }
+      }
+
+      // 2. Fallback: Send base64 PDF to Gemini AI endpoint
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const res = e.target?.result as string;
+          const base64 = res.split(',')[1] || '';
+          resolve(base64);
+        };
+        reader.onerror = (e) => reject(e);
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch('/api/parse-pdf-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdfBase64: base64Data })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Não foi possível extrair as peças do PDF.');
+      }
+
+      if (data.pecas && Array.isArray(data.pecas) && data.pecas.length > 0) {
+        const formattedPieces: PieceItem[] = data.pecas.map((p: any, idx: number) => {
+          const alt = Number(p.altura) || 10;
+          const larg = Number(p.largura) || 10;
+          const prof = Number(p.profundidade) || 10;
+          const vol = (alt * larg * prof) / 1000000;
+          return {
+            id: 'p-imp-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).substring(2, 5),
+            nome: p.nome || `Peça ${idx + 1}`,
+            tipo: p.tipo || 'biscoito',
+            metodo: p.metodo || 'ajuste_inteligente',
+            altura: alt,
+            largura: larg,
+            profundidade: prof,
+            volumeM3: vol,
+            custoCalculado: 0,
+            detalhesTecnicos: p.detalhesTecnicos || undefined,
+            incluirDetalhes: !!p.incluirDetalhes
+          };
+        });
+
+        setParsedPiecesPreview(formattedPieces);
+        setSelectedPreviewIds(new Set(formattedPieces.map(p => p.id)));
+        setPdfParseSuccessMsg(`Extração de IA concluída com sucesso! Encontradas ${formattedPieces.length} peças no documento PDF.`);
+      } else {
+        setPdfParseError('Nenhuma peça identificada neste PDF. Verifique se o arquivo corresponde a um pedido de queima anterior.');
+      }
+    } catch (err: any) {
+      console.error('Erro na leitura do PDF:', err);
+      setPdfParseError(err.message || 'Erro ao processar o arquivo PDF. Tente outro documento.');
+    } finally {
+      setIsParsingPdf(false);
+    }
+  };
+
+  const handleConfirmImport = (mode: 'replace' | 'append') => {
+    const piecesToImport = parsedPiecesPreview.filter(p => selectedPreviewIds.has(p.id));
+    if (piecesToImport.length === 0) {
+      setPdfParseError('Selecione pelo menos uma peça para importar.');
+      return;
+    }
+
+    if (mode === 'replace') {
+      setPiecesList(piecesToImport);
+    } else {
+      setPiecesList(prev => [...prev, ...piecesToImport]);
+    }
+
+    setShowImportPdfModal(false);
+    setParsedPiecesPreview([]);
+    setPdfParseSuccessMsg(null);
+    setPdfParseError(null);
+  };
+
+  const toggleSelectPreviewPiece = (id: string) => {
+    const newSet = new Set(selectedPreviewIds);
+    if (newSet.has(id)) {
+      newSet.delete(id);
+    } else {
+      newSet.add(id);
+    }
+    setSelectedPreviewIds(newSet);
+  };
 
   // Load user from localstorage on start
   useEffect(() => {
@@ -197,10 +480,10 @@ export default function App() {
     if (metodoQueima !== 'ajuste_inteligente') {
       if (altura > 30) {
         setMetodoQueima('fornada_inteira');
-      } else if (altura > 14.5) {
-        if (tipoQueima === 'biscoito' && metodoQueima === 'compartilhada') {
+      } else if (altura > 15) {
+        if (tipoQueima === 'biscoito' && (metodoQueima === 'compartilhada' || metodoQueima === 'reserva_prateleira')) {
           setMetodoQueima('meia_fornada');
-        } else if (tipoQueima === 'ambas' && metodoQueima === 'compartilhada') {
+        } else if (tipoQueima === 'ambas' && (metodoQueima === 'compartilhada' || metodoQueima === 'reserva_prateleira')) {
           setMetodoQueima('meia_fornada');
         }
       }
@@ -209,7 +492,7 @@ export default function App() {
     if (metodoQueimaEsmalte !== 'ajuste_inteligente') {
       if (altura > 30) {
         setMetodoQueimaEsmalte('fornada_inteira');
-      } else if (altura > 14.5) {
+      } else if (altura > 15) {
         if (tipoQueima === 'esmalte' && metodoQueimaEsmalte === 'reserva_prateleira') {
           setMetodoQueimaEsmalte('meia_fornada');
         } else if (tipoQueima === 'ambas' && metodoQueimaEsmalte === 'reserva_prateleira') {
@@ -247,8 +530,15 @@ export default function App() {
       if (resolvedMethod === 'fornada_inteira' || h > 30) {
         return 450.00;
       }
-      if (resolvedMethod === 'meia_fornada' || h > 14.5) {
+      if (resolvedMethod === 'meia_fornada' || h > 15) {
         return 241.88;
+      }
+      if (resolvedMethod === 'reserva_prateleira') {
+        if (h <= 10) {
+          return 108.00;
+        } else {
+          return 135.00;
+        }
       }
       // Compartilhada por volume m³ (baseado em R$ 540,00 para 0,163 m³ útil)
       const volumeCost = volumeM3 * 3312.8837;
@@ -260,7 +550,7 @@ export default function App() {
       if (resolvedMethod === 'fornada_inteira' || h > 30) {
         return 540.00;
       }
-      if (resolvedMethod === 'meia_fornada' || h > 14.5) {
+      if (resolvedMethod === 'meia_fornada' || h > 15) {
         return 290.25;
       }
       if (resolvedMethod === 'compartilhada') {
@@ -270,11 +560,11 @@ export default function App() {
         const minQueimaVolume = 15.00;
         return Math.max(volumeCost, minQueimaVolume);
       }
-      // Reserva de prateleira (baseado nos níveis práticos de 10cm ou 14.5cm)
+      // Prateleira Inteira (10cm: R$ 130,00 | 15cm: R$ 162,50)
       if (h <= 10) {
-        return 60.00; // 5 prateleiras de 10cm
+        return 130.00;
       } else {
-        return 80.00; // 4 prateleiras de 14.5cm
+        return 162.50;
       }
     } else if (type === 'monoqueima') {
       // Monoqueima (R$ 1.000,00 para o volume útil de 0,163 m³)
@@ -313,11 +603,11 @@ export default function App() {
   }, [tipoQueima, metodoQueima, metodoQueimaEsmalte, isFornadaInteira]);
 
   const isTooTall = altura > 60;
-  const isTooWide = largura > 48 || profundidade > 48;
+  const isTooWide = largura > 53 || profundidade > 53;
   const dimensionError = isTooTall 
     ? 'A peça excede a altura útil máxima do forno de 195L (60 cm).' 
     : isTooWide 
-    ? 'A peça excede as dimensões horizontais das prateleiras do forno de 195L (48x48 cm).' 
+    ? 'A peça excede as dimensões horizontais das prateleiras do forno de 195L (53x53 cm).' 
     : null;
 
   // Add piece to list
@@ -424,6 +714,49 @@ export default function App() {
     setGeminiRelatorio(null);
   };
 
+  // Editing state for pieces in quote summary
+  const [editingPieceId, setEditingPieceId] = useState<string | null>(null);
+  const [editPieceName, setEditPieceName] = useState<string>('');
+  const [editPieceAltura, setEditPieceAltura] = useState<number>(10);
+  const [editPieceLargura, setEditPieceLargura] = useState<number>(10);
+  const [editPieceProfundidade, setEditPieceProfundidade] = useState<number>(10);
+
+  const handleStartEditPiece = (p: PieceItem) => {
+    setEditingPieceId(p.id);
+    setEditPieceName(p.nome);
+    setEditPieceAltura(p.altura);
+    setEditPieceLargura(p.largura);
+    setEditPieceProfundidade(p.profundidade);
+  };
+
+  const handleSaveEditPiece = (id: string) => {
+    const alt = Math.max(0, editPieceAltura);
+    const larg = Math.max(0, editPieceLargura);
+    const prof = Math.max(0, editPieceProfundidade);
+    const vol = (alt * larg * prof) / 1000000;
+
+    setPiecesList(prev => prev.map(item => {
+      if (item.id === id) {
+        return {
+          ...item,
+          nome: editPieceName.trim() || item.nome,
+          altura: alt,
+          largura: larg,
+          profundidade: prof,
+          volumeM3: vol
+        };
+      }
+      return item;
+    }));
+
+    setEditingPieceId(null);
+    setGeminiRelatorio(null);
+  };
+
+  const handleCancelEditPiece = () => {
+    setEditingPieceId(null);
+  };
+
   // Total calculation for the whole quote based on the virtual kiln simulation packing
   const orcamentoDetalhado = useMemo(() => {
     if (piecesList.length === 0) {
@@ -436,19 +769,20 @@ export default function App() {
         qtdNiveisEstimada: 0,
         modalidadeCobranca: 'Nenhuma',
         valorFinalQueima: 0,
+        pisoAplicado: false,
         detalhesGrupos: []
       };
     }
 
-    // Run the packing simulation
-    const shelves = packPiecesOnShelves(piecesList);
+    // Run the packing simulation considering podeSobreporBiscoito
+    const shelves = packPiecesOnShelves(piecesList, { podeSobreporBiscoito });
 
     // 1. Volume total geométrico das peças
     const volumeTotalGeometricoL = piecesList.reduce((acc, curr) => acc + (curr.volumeM3 * 1000), 0);
 
     // Useful Shelf Area
-    const SHELF_RADIUS = 25; // 50cm diameter planar useful area
-    const totalShelfArea = Math.PI * SHELF_RADIUS * SHELF_RADIUS; // ~1963.5 cm²
+    const SHELF_RADIUS = 26.5; // 53cm diameter useful shelf area
+    const totalShelfArea = Math.PI * SHELF_RADIUS * SHELF_RADIUS; // ~2206.2 cm²
 
     // 2. Volume efetivamente ocupado
     const volumeEfetivoOcupadoCm3 = shelves.reduce((acc, s) => {
@@ -485,6 +819,7 @@ export default function App() {
     });
 
     let totalCost = 0;
+    let anyPisoAplicado = false;
     const detalhesGrupos: Array<{
       tipo: FiringType;
       shelves: typeof shelves;
@@ -507,39 +842,90 @@ export default function App() {
       let costMeiaFornada = 0;
       let costCompartilhada = 0;
       let costReservaPrateleira = 0;
+      let costPisoPrateleiras = 0;
+      let pureVolCost = 0;
 
       if (type === 'biscoito') {
         costFornadaInteira = 450.00;
         costMeiaFornada = 241.88;
-        costCompartilhada = groupPieces.reduce((sum, p) => {
+        pureVolCost = groupPieces.reduce((sum, p) => {
           const vCost = p.volumeM3 * 3312.8837;
           return sum + Math.max(vCost, 12.00);
         }, 0);
+        costReservaPrateleira = groupShelves.reduce((sum, s) => {
+          if (s.maxHeight <= 10) return sum + 108.00;
+          return sum + 135.00;
+        }, 0);
+
+        // Shelf occupation floor minimum (Piso Mínimo por Prateleiras Ocupadas: 1/4, 2/4, 3/4, 4/4)
+        if (groupNumShelves === 1) {
+          costPisoPrateleiras = Math.max(costFornadaInteira * 0.25, costReservaPrateleira);
+        } else if (groupNumShelves === 2) {
+          costPisoPrateleiras = Math.max(costFornadaInteira * 0.50, costMeiaFornada);
+        } else if (groupNumShelves === 3) {
+          costPisoPrateleiras = costFornadaInteira * 0.75;
+        } else if (groupNumShelves >= 4) {
+          costPisoPrateleiras = costFornadaInteira * (groupNumShelves / 4);
+        }
+
+        costCompartilhada = Math.max(pureVolCost, costPisoPrateleiras);
+
       } else if (type === 'esmalte') {
         costFornadaInteira = 540.00;
         costMeiaFornada = 290.25;
-        costCompartilhada = groupPieces.reduce((sum, p) => {
+        pureVolCost = groupPieces.reduce((sum, p) => {
           const vCost = p.volumeM3 * 3975.4601;
           return sum + Math.max(vCost, 15.00);
         }, 0);
         costReservaPrateleira = groupShelves.reduce((sum, s) => {
-          if (s.maxHeight <= 10) return sum + 60.00;
-          return sum + 80.00;
+          if (s.maxHeight <= 10) return sum + 130.00;
+          return sum + 162.50;
         }, 0);
+
+        if (groupNumShelves === 1) {
+          costPisoPrateleiras = Math.max(costFornadaInteira * 0.25, costReservaPrateleira);
+        } else if (groupNumShelves === 2) {
+          costPisoPrateleiras = Math.max(costFornadaInteira * 0.50, costMeiaFornada);
+        } else if (groupNumShelves === 3) {
+          costPisoPrateleiras = costFornadaInteira * 0.75;
+        } else if (groupNumShelves >= 4) {
+          costPisoPrateleiras = costFornadaInteira * (groupNumShelves / 4);
+        }
+
+        costCompartilhada = Math.max(pureVolCost, costPisoPrateleiras);
+
       } else if (type === 'monoqueima') {
         costFornadaInteira = 1000.00;
         costMeiaFornada = 532.13;
-        costCompartilhada = groupPieces.reduce((sum, p) => {
+        pureVolCost = groupPieces.reduce((sum, p) => {
           const vCost = p.volumeM3 * 7361.9632;
           return sum + Math.max(vCost, 25.00);
         }, 0);
+
+        if (groupNumShelves === 1) {
+          costPisoPrateleiras = costFornadaInteira * 0.25;
+        } else if (groupNumShelves === 2) {
+          costPisoPrateleiras = Math.max(costFornadaInteira * 0.50, costMeiaFornada);
+        } else if (groupNumShelves === 3) {
+          costPisoPrateleiras = costFornadaInteira * 0.75;
+        } else if (groupNumShelves >= 4) {
+          costPisoPrateleiras = costFornadaInteira * (groupNumShelves / 4);
+        }
+
+        costCompartilhada = Math.max(pureVolCost, costPisoPrateleiras);
+
       } else if (type === 'terceira_queima') {
         costFornadaInteira = 540.00;
+        pureVolCost = 540.00;
         costCompartilhada = 540.00;
       }
 
+      if (costPisoPrateleiras > pureVolCost) {
+        anyPisoAplicado = true;
+      }
+
       const fitsInMeia = groupHeight <= 30 && groupNumShelves <= 2 && groupPieces.every(p => p.altura <= 30);
-      const fitsInReserva = type === 'esmalte' && groupPieces.every(p => p.altura <= 14.5);
+      const fitsInReserva = (type === 'esmalte' || type === 'biscoito') && groupPieces.every(p => p.altura <= 15);
 
       let selectedMode = 'ajuste_inteligente';
       if (type === 'biscoito') {
@@ -555,7 +941,7 @@ export default function App() {
 
       if (selectedMode === 'fornada_inteira') {
         resolvedMode = 'Fornada Inteira';
-        finalGroupCost = costFornadaInteira;
+        finalGroupCost = costFornadaInteira * Math.max(1, Math.ceil(groupNumShelves / 4));
       } else if (selectedMode === 'meia_fornada') {
         if (fitsInMeia) {
           resolvedMode = 'Meia Fornada';
@@ -565,26 +951,33 @@ export default function App() {
           finalGroupCost = costFornadaInteira;
         }
       } else if (selectedMode === 'compartilhada') {
-        resolvedMode = 'Compartilhada';
+        if (costPisoPrateleiras > pureVolCost) {
+          resolvedMode = `Compartilhada (${groupNumShelves}/4 Prateleiras)`;
+        } else {
+          resolvedMode = 'Compartilhada (m³)';
+        }
         finalGroupCost = costCompartilhada;
-      } else if (selectedMode === 'reserva_prateleira' && type === 'esmalte') {
+      } else if (selectedMode === 'reserva_prateleira' && (type === 'esmalte' || type === 'biscoito')) {
         if (fitsInReserva) {
-          resolvedMode = 'Reserva de Prateleira';
+          resolvedMode = 'Prateleira Inteira';
           finalGroupCost = costReservaPrateleira;
         } else {
-          resolvedMode = 'Meia Fornada (Forçado - Excede Reserva)';
+          resolvedMode = 'Meia Fornada (Forçado - Excede Prateleira)';
           finalGroupCost = fitsInMeia ? costMeiaFornada : costFornadaInteira;
         }
       } else {
         // Ajuste Inteligente
         const options: Array<{ mode: string; cost: number }> = [];
-        options.push({ mode: 'Compartilhada', cost: costCompartilhada });
+        const compartilhadaLabel = costPisoPrateleiras > pureVolCost 
+          ? `Compartilhada (${groupNumShelves}/4 Prateleiras)` 
+          : 'Compartilhada (m³)';
+        options.push({ mode: compartilhadaLabel, cost: costCompartilhada });
         if (fitsInMeia) {
           options.push({ mode: 'Meia Fornada', cost: costMeiaFornada });
         }
-        options.push({ mode: 'Fornada Inteira', cost: costFornadaInteira });
-        if (type === 'esmalte' && fitsInReserva) {
-          options.push({ mode: 'Reserva de Prateleira', cost: costReservaPrateleira });
+        options.push({ mode: 'Fornada Inteira', cost: costFornadaInteira * Math.max(1, Math.ceil(groupNumShelves / 4)) });
+        if ((type === 'esmalte' || type === 'biscoito') && fitsInReserva) {
+          options.push({ mode: 'Prateleira Inteira', cost: costReservaPrateleira });
         }
         options.sort((a, b) => a.cost - b.cost);
         resolvedMode = options[0].mode;
@@ -616,9 +1009,10 @@ export default function App() {
       qtdNiveisEstimada,
       modalidadeCobranca,
       valorFinalQueima: totalCost,
+      pisoAplicado: anyPisoAplicado,
       detalhesGrupos
     };
-  }, [piecesList, metodoQueima, metodoQueimaEsmalte]);
+  }, [piecesList, metodoQueima, metodoQueimaEsmalte, podeSobreporBiscoito]);
 
   const piecesWithAdjustedCosts = useMemo(() => {
     const costMap: Record<string, number> = {};
@@ -647,35 +1041,14 @@ export default function App() {
 
       const grupoDetalhe = detalhesGrupos.find(dg => dg.tipo === type);
       const finalGroupCost = grupoDetalhe ? grupoDetalhe.cost : 0;
-      const mode = grupoDetalhe ? grupoDetalhe.mode : 'Compartilhada';
 
-      if (mode.startsWith('Compartilhada')) {
-        // Shared mode: use the standard shared volume cost directly
-        groupPieces.forEach(p => {
-          let rate = 3312.8837;
-          let minCost = 12.00;
-          if (type === 'esmalte') {
-            rate = 3975.4601;
-            minCost = 15.00;
-          } else if (type === 'monoqueima') {
-            rate = 7361.9632;
-            minCost = 25.00;
-          } else if (type === 'terceira_queima') {
-            rate = 3312.8837;
-          }
-
-          const vCost = p.volumeM3 * rate;
-          costMap[p.id] = type === 'terceira_queima' ? finalGroupCost / groupPieces.length : Math.max(vCost, minCost);
-        });
-      } else {
-        // Flat rate mode (Meia Fornada, Fornada Inteira, Reserva de Prateleira):
-        // Distribute proportional to volume!
-        const totalVolume = groupPieces.reduce((sum, p) => sum + p.volumeM3, 0);
-        groupPieces.forEach(p => {
-          const share = totalVolume > 0 ? (p.volumeM3 / totalVolume) * finalGroupCost : finalGroupCost / groupPieces.length;
-          costMap[p.id] = share;
-        });
-      }
+      const totalVolume = groupPieces.reduce((sum, p) => sum + p.volumeM3, 0);
+      groupPieces.forEach(p => {
+        const share = totalVolume > 0 
+          ? (p.volumeM3 / totalVolume) * finalGroupCost 
+          : finalGroupCost / groupPieces.length;
+        costMap[p.id] = share;
+      });
     });
 
     return piecesList.map(p => ({
@@ -697,7 +1070,7 @@ export default function App() {
                         p.tipo === 'esmalte' ? 'Queima de Esmalte (1240ºC)' :
                         p.tipo === 'monoqueima' ? 'Monoqueima (1240ºC)' : 'Terceira Queima (750ºC)';
       const metodoLabel = p.metodo === 'compartilhada' ? 'Compartilhada (m³)' : 
-                          p.metodo === 'reserva_prateleira' ? 'Reserva de Prateleira' :
+                          p.metodo === 'reserva_prateleira' ? 'Prateleira Inteira' :
                           p.metodo === 'meia_fornada' ? 'Meia Fornada' : 'Fornada Inteira';
 
       msg += `*${idx + 1}. ${p.nome}*\n`;
@@ -726,10 +1099,19 @@ export default function App() {
     msg += `  • Níveis de Prateleira: ${orcamentoDetalhado.qtdNiveisEstimada}\n`;
     msg += `  • Modalidade de Cobrança: ${orcamentoDetalhado.modalidadeCobranca}\n`;
     msg += `--------------------------------------------------\n`;
-    msg += `*Total Estimado Final:* R$ ${totalOrcamento.toFixed(2)}\n\n`;
-    msg += `_Observações Importantes:_\n`;
-    msg += `⚠️ Na queima de esmalte, o espaçamento de segurança é indispensável.\n`;
-    msg += `⚠️ Danos provocados por esmalte escorrido às placas e prateleiras são de responsabilidade financeira do ceramista.\n`;
+    msg += `*OBSERVAÇÕES E TERMOS TÉCNICOS*\n\n`;
+    msg += `• As medidas consideradas são sempre as dimensões máximas da peça, incluindo alças, bicos, pés e saliências.\n`;
+    msg += `• O acondicionamento das peças no forno é de responsabilidade técnica exclusiva do Ateliê Ollaria Cerâmica, visando o melhor aproveitamento do espaço e a segurança da queima.\n`;
+    msg += `• Na queima de esmalte, o espaçamento técnico de segurança entre as peças é indispensável para evitar fusão e danos.\n`;
+    msg += `• As temperaturas de referência utilizadas pelo ateliê são:\n`;
+    msg += `  - Queima de biscoito: aproximadamente 1.000 °C;\n`;
+    msg += `  - Queima de esmalte e monoqueima: aproximadamente 1.240 °C.\n`;
+    msg += `• Todo forno cerâmico apresenta pequenas variações naturais de temperatura entre diferentes regiões da câmara de queima. Essas diferenças são inerentes ao processo cerâmico e não caracterizam falha do equipamento nem responsabilidade do ateliê.\n`;
+    msg += `• Caso o cliente deseje acompanhamento por cones pirométricos, deverá solicitá-lo previamente. Os cones são cobrados por unidade utilizada, e o serviço de acompanhamento e leitura possui cobrança adicional.\n`;
+    msg += `• Peças destinadas à queima de esmalte passam por avaliação técnica quanto à compatibilidade da argila, esmalte e temperatura de queima. O ateliê poderá recusar peças que apresentem risco ao forno ou às demais peças da fornada.\n`;
+    msg += `• Caso o esmalte escorra e provoque danos às prateleiras, placas, suportes ou demais componentes do forno, o cliente será responsável pelos custos de limpeza, reparo ou substituição dos materiais danificados.\n`;
+    msg += `• O processo cerâmico envolve riscos inerentes, como trincas, rachaduras, empenamentos, deformações, bolhas, pinholes, variações de cor, diferenças de textura e outras alterações decorrentes da secagem, da formulação dos esmaltes, da argila ou da compatibilidade entre materiais. Tais ocorrências fazem parte da natureza da cerâmica e não caracterizam responsabilidade do ateliê.\n`;
+    msg += `• O Ateliê Ollaria Cerâmica é responsável pela correta condução do processo de queima, não podendo garantir resultados estéticos ou técnicos decorrentes da construção da peça, da qualidade da argila, da aplicação de esmaltes ou da compatibilidade entre os materiais utilizados pelo cliente.\n`;
     
     return msg;
   };
@@ -757,6 +1139,32 @@ export default function App() {
   const handleGeneratePDF = () => {
     try {
       const doc = new jsPDF();
+
+      // Embed structured digital metadata for 100% instant re-importing
+      const pdfMetaPayload = {
+        version: 1,
+        app: 'Ollaria Ateliê',
+        timestamp: new Date().toISOString(),
+        pieces: piecesWithAdjustedCosts.map(p => ({
+          nome: p.nome,
+          tipo: p.tipo,
+          metodo: p.metodo,
+          altura: p.altura,
+          largura: p.largura,
+          profundidade: p.profundidade,
+          detalhesTecnicos: p.detalhesTecnicos,
+          incluirDetalhes: p.incluirDetalhes
+        }))
+      };
+      const jsonMetaString = JSON.stringify(pdfMetaPayload);
+      const b64Meta = btoa(unescape(encodeURIComponent(jsonMetaString)));
+
+      doc.setProperties({
+        title: 'Orçamento de Queima - Ollaria Ateliê',
+        subject: `OLLARIA_ORDER_DATA_V1:${b64Meta}`,
+        author: 'Ollaria Ateliê',
+        keywords: `OLLARIA_ORDER_DATA_V1:${b64Meta}`
+      });
       
       // Theme colors for PDF
       const terracottaColor = '#C15E3F';
@@ -826,7 +1234,7 @@ export default function App() {
                           p.tipo === 'esmalte' ? 'Queima de Esmalte (Alta Temp - 1240oC)' :
                           p.tipo === 'monoqueima' ? 'Monoqueima (1240oC)' : 'Terceira Queima (750oC)';
         const metodoLabel = p.metodo === 'compartilhada' ? 'Compartilhada (por volume)' : 
-                            p.metodo === 'reserva_prateleira' ? 'Reserva de Prateleira' :
+                            p.metodo === 'reserva_prateleira' ? 'Prateleira Inteira' :
                             p.metodo === 'meia_fornada' ? 'Meia Fornada' : 'Fornada Inteira';
 
         doc.text(`Tipo de Queima: ${tipoLabel} | Modalidade: ${metodoLabel}`, 20, y + 12);
@@ -897,33 +1305,52 @@ export default function App() {
       doc.text(`R$ ${totalOrcamento.toFixed(2)}`, 155, y);
       y += 12;
 
-      // Importante Rules block
+      // Official OBSERVAÇÕES E TERMOS TÉCNICOS block in PDF
+      const termosTecnicosPDF = [
+        "As medidas consideradas são sempre as dimensões máximas da peça, incluindo alças, bicos, pés e saliências.",
+        "O acondicionamento das peças no forno é de responsabilidade técnica exclusiva do Ateliê Ollaria Cerâmica, visando o melhor aproveitamento do espaço e a segurança da queima.",
+        "Na queima de esmalte, o espaçamento técnico de segurança entre as peças é indispensável para evitar fusão e danos.",
+        "As temperaturas de referência utilizadas pelo ateliê são: Queima de biscoito (~1.000 °C); Queima de esmalte e monoqueima (~1.240 °C).",
+        "Todo forno cerâmico apresenta pequenas variações naturais de temperatura entre diferentes regiões da câmara de queima. Essas diferenças são inerentes ao processo cerâmico e não caracterizam falha do equipamento nem responsabilidade do ateliê.",
+        "Caso o cliente deseje acompanhamento por cones pirométricos, deverá solicitá-lo previamente. Os cones são cobrados por unidade utilizada, e o serviço de acompanhamento e leitura possui cobrança adicional.",
+        "Peças destinadas à queima de esmalte passam por avaliação técnica quanto à compatibilidade da argila, esmalte e temperatura de queima. O ateliê poderá recusar peças que apresentem risco ao forno ou às demais peças da fornada.",
+        "Caso o esmalte escorra e provoque danos às prateleiras, placas, suportes ou demais componentes do forno, o cliente será responsável pelos custos de limpeza, reparo ou substituição dos materiais danificados.",
+        "O processo cerâmico envolve riscos inerentes, como trincas, rachaduras, empenamentos, deformações, bolhas, pinholes, variações de cor, diferenças de textura e outras alterações decorrentes da secagem, da formulação dos esmaltes, da argila ou da compatibilidade entre materiais. Tais ocorrências fazem parte da natureza da cerâmica e não caracterizam responsabilidade do ateliê.",
+        "O Ateliê Ollaria Cerâmica é responsável pela correta condução do processo de queima, não podendo garantir resultados estéticos ou técnicos decorrentes da construção da peça, da qualidade da argila, da aplicação de esmaltes ou da compatibilidade entre os materiais utilizados pelo cliente."
+      ];
+
+      if (y > 200) {
+        doc.addPage();
+        y = 20;
+      }
+
       doc.setFillColor(249, 248, 246);
-      doc.rect(15, y, 180, 42, 'F');
       doc.setDrawColor(226, 222, 208);
-      doc.rect(15, y, 180, 42, 'D');
 
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8.5);
+      doc.setFontSize(9.5);
       doc.setTextColor(193, 94, 63);
-      doc.text('OBSERVACOES E TERMOS DE SEGURANCA TECNICA:', 20, y + 6);
+      doc.text('OBSERVAÇÕES E TERMOS TÉCNICOS', 15, y);
+      y += 6;
 
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(7.5);
       doc.setTextColor(74, 68, 63);
-      const terms = [
-        '- As medidas consideradas sao sempre as dimensoes maximas da peca, incluindo alcas, bicos, pes e salienias.',
-        '- O acondicionamento das pecas no forno e de responsabilidade tecnica exclusiva do atelie cerâmico.',
-        '- Na queima de esmalte, o espacamento de seguranâa regulamentar entre as pecas e indispensavel para evitar fusao.',
-        '- Caso o esmalte escorra e provoque danos as prateleiras, placas ou suportes, o ceramista devera arcar com os custos de reparo.',
-        '- Peças destinadas à queima de esmalte passam por avaliação técnica de viabilidade e compatibilidade de temperatura.'
-      ];
-      
-      terms.forEach((term, i) => {
-        doc.text(term, 20, y + 13 + (i * 5.5));
+
+      termosTecnicosPDF.forEach((term) => {
+        const lines = doc.splitTextToSize(`• ${term}`, 180);
+        const blockHeight = lines.length * 3.8;
+
+        if (y + blockHeight > 280) {
+          doc.addPage();
+          y = 20;
+        }
+
+        doc.text(lines, 15, y);
+        y += blockHeight + 1.5;
       });
 
-      doc.save(`orcamento-atelie-cerâmico.pdf`);
+      doc.save(`orcamento-atelie-ollaria.pdf`);
     } catch (e) {
       console.error('Error generating PDF:', e);
       alert('Houve um erro ao gerar o PDF. Verifique se as informações inseridas estão corretas.');
@@ -1241,10 +1668,19 @@ export default function App() {
             {/* Left: Input Panel */}
             <section className="flex-1 lg:max-w-[650px] border-r border-[#E2DED0] p-4 sm:p-6 md:p-8 flex flex-col gap-6 bg-white overflow-y-auto">
               <div>
-                <div className="flex flex-wrap items-center gap-2 mb-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <span className="px-2.5 py-1 bg-[#4A443F] text-white text-[10px] rounded uppercase font-extrabold tracking-wider">
                     PARÂMETROS DA PEÇA
                   </span>
+                  <button 
+                    onClick={() => setShowImportPdfModal(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#FDF7F5] hover:bg-[#F9EFEA] text-[#C15E3F] rounded-xl text-xs font-bold transition-all border border-[#C15E3F]/30 shadow-xs cursor-pointer"
+                    title="Subir PDF de pedido anterior para recarregar todas as peças"
+                    id="btn-open-pdf-import"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Subir PDF Anterior</span>
+                  </button>
                 </div>
                 <h2 className="text-xl font-bold text-[#4A443F] tracking-tight mb-1">Configurar Nova Peça</h2>
                 <p className="text-xs text-[#8A847C]">Insira as dimensões exatas de fabricação (incluindo alças, bicos, pés e saliências).</p>
@@ -1368,6 +1804,7 @@ export default function App() {
                           >
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente</option>
                             <option value="compartilhada">Compartilhada (m³)</option>
+                            <option value="reserva_prateleira">Prateleira Inteira (R$ 108 / R$ 135)</option>
                             <option value="meia_fornada">Meia Fornada</option>
                             <option value="fornada_inteira">Fornada Inteira (R$ 450,00)</option>
                           </select>
@@ -1382,7 +1819,7 @@ export default function App() {
                           >
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente</option>
                             <option value="compartilhada">Compartilhada (m³)</option>
-                            <option value="reserva_prateleira">Reserva Prateleira</option>
+                            <option value="reserva_prateleira">Prateleira Inteira (R$ 130 / R$ 162,50)</option>
                             <option value="meia_fornada">Meia Fornada</option>
                             <option value="fornada_inteira">Fornada Inteira (R$ 540,00)</option>
                           </select>
@@ -1405,6 +1842,7 @@ export default function App() {
                           <>
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente (Automático)</option>
                             <option value="compartilhada">Compartilhada (Por Volume m³)</option>
+                            <option value="reserva_prateleira">Prateleira Inteira (10cm: R$ 108,00 | 15cm: R$ 135,00)</option>
                             <option value="meia_fornada">Meia Fornada (Até 30 cm de altura)</option>
                             <option value="fornada_inteira">Fornada Inteira (R$ 450,00)</option>
                           </>
@@ -1419,7 +1857,7 @@ export default function App() {
                           <>
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente (Automático)</option>
                             <option value="compartilhada">Compartilhada (Por Volume m³)</option>
-                            <option value="reserva_prateleira">Reserva de Prateleira Inteira</option>
+                            <option value="reserva_prateleira">Prateleira Inteira (10cm: R$ 130,00 | 15cm: R$ 162,50)</option>
                             <option value="meia_fornada">Meia Fornada (Até 30 cm de altura)</option>
                             <option value="fornada_inteira">Fornada Inteira (R$ 540,00)</option>
                           </>
@@ -1429,6 +1867,44 @@ export default function App() {
                           </>
                         )}
                       </select>
+                    )}
+
+                    {/* Biscoito Stacking / Overlapping Control */}
+                    {(tipoQueima === 'biscoito' || tipoQueima === 'ambas') && (
+                      <div className="mt-3 p-3 bg-white border border-[#E2DED0] rounded-xl space-y-2 shadow-2xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Layers className="w-4 h-4 text-[#C15E3F] shrink-0" />
+                            <div>
+                              <span className="text-xs font-bold text-[#4A443F] block">Empilhar / Sobrepor Peças no Biscoito?</span>
+                              <span className="text-[10px] text-[#8A847C] block">
+                                {podeSobreporBiscoito 
+                                  ? '🟢 SIM: Peças de biscoito podem ser empilhadas' 
+                                  : '🔴 NÃO: Peças não podem se tocar (lado a lado)'}
+                              </span>
+                            </div>
+                          </div>
+                          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                            <input 
+                              type="checkbox" 
+                              checked={podeSobreporBiscoito} 
+                              onChange={(e) => setPodeSobreporBiscoito(e.target.checked)}
+                              className="sr-only peer"
+                              id="toggle-pode-sobrepor-biscoito"
+                            />
+                            <div className="w-9 h-5 bg-[#E2DED0] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#C15E3F]"></div>
+                          </label>
+                        </div>
+
+                        {!podeSobreporBiscoito && (
+                          <div className="p-2 bg-[#FDF7F5] border border-[#C15E3F]/30 rounded-lg flex items-start gap-1.5 text-[10.5px] text-[#C15E3F] leading-snug">
+                            <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>
+                              Sem empilhamento, cada peça ocupará seu espaço individual nas prateleiras. O orçamento cobrará o valor proporcional pelas prateleiras inteiras necessárias (1/4, 2/4, 3/4 ou Fornada Inteira).
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* Visual indicator of Smart Adjustment resolution */}
@@ -1448,6 +1924,7 @@ export default function App() {
                               <span className="text-[#8A847C]">{tipoQueima === 'monoqueima' ? 'Monoqueima' : 'Biscoito'} ({altura}cm):</span>
                               <span className="font-bold text-[#4A443F] uppercase">
                                 {resolveSmartMethod(tipoQueima === 'ambas' ? 'biscoito' : tipoQueima, altura) === 'compartilhada' ? 'Queima Compartilhada (m³)' : 
+                                 resolveSmartMethod(tipoQueima === 'ambas' ? 'biscoito' : tipoQueima, altura) === 'reserva_prateleira' ? (altura <= 10 ? 'Prateleira 10cm (R$ 108,00)' : 'Prateleira 15cm (R$ 135,00)') :
                                  resolveSmartMethod(tipoQueima === 'ambas' ? 'biscoito' : tipoQueima, altura) === 'meia_fornada' ? 'Meia Fornada' : 'Fornada Inteira'}
                               </span>
                             </div>
@@ -1456,7 +1933,7 @@ export default function App() {
                             <div className="flex justify-between items-center bg-white/70 px-2 py-1 rounded">
                               <span className="text-[#8A847C]">Esmalte ({altura}cm):</span>
                               <span className="font-bold text-[#4A443F] uppercase">
-                                {resolveSmartMethod('esmalte', altura) === 'reserva_prateleira' ? (altura <= 10 ? 'Prateleira 50x10cm' : 'Prateleira 50x14.5cm') : 
+                                {resolveSmartMethod('esmalte', altura) === 'reserva_prateleira' ? (altura <= 10 ? 'Prateleira 10cm (R$ 130,00)' : 'Prateleira 15cm (R$ 162,50)') : 
                                  resolveSmartMethod('esmalte', altura) === 'meia_fornada' ? 'Meia Fornada' : 'Fornada Inteira'}
                               </span>
                             </div>
@@ -1738,46 +2215,155 @@ export default function App() {
                     <Flame className="w-5 h-5" />
                   </div>
 
-                  <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8A847C] mb-4">Resumo do Orçamento</h3>
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-[#8A847C]">Resumo do Orçamento</h3>
+                    <button 
+                      onClick={() => setShowImportPdfModal(true)}
+                      className="text-xs font-bold text-[#C15E3F] hover:underline flex items-center gap-1 cursor-pointer"
+                      id="btn-open-pdf-import-summary"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Subir PDF</span>
+                    </button>
+                  </div>
 
                   {/* List of current pieces */}
                   <div className="space-y-3 mb-6 max-h-[220px] overflow-y-auto pr-1">
                     {piecesList.length === 0 ? (
                       <div className="text-center py-6">
                         <p className="text-sm font-semibold text-[#8A847C]">Nenhuma peça no orçamento.</p>
-                        <p className="text-[11px] text-[#8A847C] mt-1">Configure as dimensões à esquerda e adicione peças.</p>
+                        <p className="text-[11px] text-[#8A847C] mt-1 mb-3">Configure as dimensões à esquerda e adicione peças.</p>
+                        <button 
+                          onClick={() => setShowImportPdfModal(true)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#FDF7F5] border border-[#C15E3F]/30 text-[#C15E3F] rounded-xl text-xs font-bold hover:bg-[#F9EFEA] transition-colors cursor-pointer"
+                        >
+                          <FileUp className="w-3.5 h-3.5" />
+                          <span>Importar PDF de Pedido Anterior</span>
+                        </button>
                       </div>
                     ) : (
-                      piecesWithAdjustedCosts.map((p) => (
-                        <div key={p.id} className="flex justify-between items-center border-b border-[#F0EEE8] pb-2.5">
-                          <div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-xs font-bold text-[#4A443F]">{p.nome}</span>
-                              <span className="text-[9px] px-1.5 py-0.2 bg-[#F2EFE9] rounded text-[#8A847C] font-semibold uppercase">
-                                {p.tipo}
-                              </span>
+                      piecesWithAdjustedCosts.map((p) => {
+                        if (editingPieceId === p.id) {
+                          return (
+                            <div key={p.id} className="p-3 bg-[#FAF9F6] border border-[#C15E3F] rounded-xl space-y-2.5 my-1 shadow-xs">
+                              <div className="flex justify-between items-center">
+                                <span className="text-[10px] font-bold text-[#C15E3F] uppercase tracking-wider">Editar Peça</span>
+                                <span className="text-[9px] px-1.5 py-0.2 bg-[#F2EFE9] rounded text-[#8A847C] font-semibold uppercase">
+                                  {p.tipo}
+                                </span>
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-[#4A443F] block mb-0.5">Nome da Peça</label>
+                                <input 
+                                  type="text" 
+                                  value={editPieceName}
+                                  onChange={(e) => setEditPieceName(e.target.value)}
+                                  className="w-full text-xs font-bold p-1.5 bg-white border border-[#E2DED0] rounded-lg focus:outline-none focus:border-[#C15E3F]"
+                                  placeholder="Nome da peça"
+                                  id={`input-edit-nome-${p.id}`}
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-[#4A443F] block mb-0.5">Dimensões (AxLxP em cm)</label>
+                                <div className="grid grid-cols-3 gap-1.5">
+                                  <div>
+                                    <span className="text-[9px] text-[#8A847C] block">Alt (cm)</span>
+                                    <input 
+                                      type="number" 
+                                      step="0.1"
+                                      min="0"
+                                      value={editPieceAltura}
+                                      onChange={(e) => setEditPieceAltura(parseFloat(e.target.value) || 0)}
+                                      className="w-full text-xs font-mono font-bold p-1 bg-white border border-[#E2DED0] rounded focus:outline-none focus:border-[#C15E3F]"
+                                      id={`input-edit-alt-${p.id}`}
+                                    />
+                                  </div>
+                                  <div>
+                                    <span className="text-[9px] text-[#8A847C] block">Larg (cm)</span>
+                                    <input 
+                                      type="number" 
+                                      step="0.1"
+                                      min="0"
+                                      value={editPieceLargura}
+                                      onChange={(e) => setEditPieceLargura(parseFloat(e.target.value) || 0)}
+                                      className="w-full text-xs font-mono font-bold p-1 bg-white border border-[#E2DED0] rounded focus:outline-none focus:border-[#C15E3F]"
+                                      id={`input-edit-larg-${p.id}`}
+                                    />
+                                  </div>
+                                  <div>
+                                    <span className="text-[9px] text-[#8A847C] block">Prof (cm)</span>
+                                    <input 
+                                      type="number" 
+                                      step="0.1"
+                                      min="0"
+                                      value={editPieceProfundidade}
+                                      onChange={(e) => setEditPieceProfundidade(parseFloat(e.target.value) || 0)}
+                                      className="w-full text-xs font-mono font-bold p-1 bg-white border border-[#E2DED0] rounded focus:outline-none focus:border-[#C15E3F]"
+                                      id={`input-edit-prof-${p.id}`}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex justify-end gap-1.5 pt-1">
+                                <button 
+                                  onClick={handleCancelEditPiece}
+                                  className="px-2.5 py-1 bg-white border border-[#E2DED0] hover:bg-[#F2EFE9] text-[#4A443F] text-[11px] font-bold rounded-lg transition-colors cursor-pointer"
+                                  id={`btn-cancel-edit-${p.id}`}
+                                >
+                                  Cancelar
+                                </button>
+                                <button 
+                                  onClick={() => handleSaveEditPiece(p.id)}
+                                  className="px-3 py-1 bg-[#C15E3F] text-white text-[11px] font-bold rounded-lg hover:bg-[#a64e32] transition-colors cursor-pointer flex items-center gap-1"
+                                  id={`btn-save-edit-${p.id}`}
+                                >
+                                  <Check className="w-3 h-3" />
+                                  <span>Salvar</span>
+                                </button>
+                              </div>
                             </div>
-                            <p className="text-[11px] text-[#8A847C]">
-                              {p.metodo === 'fornada_inteira' || (p.altura === 0 && p.largura === 0 && p.profundidade === 0)
-                                ? 'Fornada Inteira (Capacidade total)'
-                                : `${p.altura}x${p.largura}x${p.profundidade}cm • ${p.metodo.replace('_', ' ')}`}
-                            </p>
+                          );
+                        }
+
+                        return (
+                          <div key={p.id} className="flex justify-between items-center border-b border-[#F0EEE8] pb-2.5">
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs font-bold text-[#4A443F]">{p.nome}</span>
+                                <span className="text-[9px] px-1.5 py-0.2 bg-[#F2EFE9] rounded text-[#8A847C] font-semibold uppercase">
+                                  {p.tipo}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#8A847C]">
+                                {p.metodo === 'fornada_inteira' || (p.altura === 0 && p.largura === 0 && p.profundidade === 0)
+                                  ? 'Fornada Inteira (Capacidade total)'
+                                  : `${p.altura}x${p.largura}x${p.profundidade}cm • ${p.metodo.replace('_', ' ')}`}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-mono font-bold text-[#4A443F]">
+                                R$ {p.custoCalculado.toFixed(2)}
+                              </span>
+                              <button 
+                                onClick={() => handleStartEditPiece(p)}
+                                className="text-[#C15E3F] hover:text-[#a64e32] p-1 rounded hover:bg-[#FDF7F5] transition-colors cursor-pointer"
+                                title="Editar nome ou tamanho"
+                                id={`btn-edit-${p.id}`}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button 
+                                onClick={() => handleRemovePiece(p.id)}
+                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                                title="Remover peça"
+                                id={`btn-remove-${p.id}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs font-mono font-bold text-[#4A443F]">
-                              R$ {p.custoCalculado.toFixed(2)}
-                            </span>
-                            <button 
-                              onClick={() => handleRemovePiece(p.id)}
-                              className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 transition-colors cursor-pointer"
-                              title="Remover peça"
-                              id={`btn-remove-${p.id}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
@@ -1813,11 +2399,23 @@ export default function App() {
                           <span className="font-semibold">{orcamentoDetalhado.qtdNiveisEstimada}</span>
                         </div>
                       </div>
-                      <div className="p-2.5 bg-[#FDF7F5] rounded-lg border border-[#F0EEE8] text-[11px]">
+                      <div className="p-2.5 bg-[#FDF7F5] rounded-lg border border-[#F0EEE8] text-[11px] space-y-2">
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-[#8A847C] font-semibold shrink-0">Modalidade de Cobrança:</span>
                           <span className="font-bold text-[#C15E3F] text-right">{orcamentoDetalhado.modalidadeCobranca}</span>
                         </div>
+
+                        {orcamentoDetalhado.pisoAplicado && (
+                          <div className="pt-2 border-t border-[#C15E3F]/20 text-[10.5px] text-[#4A443F] space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-[#C15E3F]">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Proteção de Custo do Ateliê (Piso por Prateleira)</span>
+                            </div>
+                            <p className="text-[#8A847C] leading-snug">
+                              As peças ocuparam <strong>{orcamentoDetalhado.qtdPrateleiras} prateleira(s)</strong> ({orcamentoDetalhado.qtdPrateleiras}/4 da capacidade total do forno). O valor final aplica a fração proporcional justa ({orcamentoDetalhado.qtdPrateleiras}/4 do forno) para cobrir o custo de reserva física do espaço no forno.
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1914,6 +2512,41 @@ export default function App() {
                         </button>
                       </div>
 
+                      {/* Expandable Technical Terms Card */}
+                      <div className="mt-2 border border-[#E2DED0] rounded-xl overflow-hidden bg-[#FAF9F6]">
+                        <button 
+                          onClick={() => setShowTermosTecnicos(!showTermosTecnicos)}
+                          className="w-full px-3 py-2 flex items-center justify-between text-left hover:bg-[#F2EFE9] transition-colors cursor-pointer"
+                          id="btn-toggle-termos"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <Info className="w-3.5 h-3.5 text-[#C15E3F]" />
+                            <span className="text-xs font-bold text-[#4A443F]">OBSERVAÇÕES E TERMOS TÉCNICOS</span>
+                          </div>
+                          <span className="text-[10px] text-[#C15E3F] font-semibold">
+                            {showTermosTecnicos ? 'Ocultar' : 'Ver Todos (10 itens)'}
+                          </span>
+                        </button>
+
+                        {showTermosTecnicos && (
+                          <div className="p-3 pt-2 border-t border-[#E2DED0] text-[11px] text-[#4A443F] space-y-2 bg-white max-h-60 overflow-y-auto">
+                            <p>• As medidas consideradas são sempre as dimensões máximas da peça, incluindo alças, bicos, pés e saliências.</p>
+                            <p>• O acondicionamento das peças no forno é de responsabilidade técnica exclusiva do Ateliê Ollaria Cerâmica, visando o melhor aproveitamento do espaço e a segurança da queima.</p>
+                            <p>• Na queima de esmalte, o espaçamento técnico de segurança entre as peças é indispensável para evitar fusão e danos.</p>
+                            <p>• As temperaturas de referência utilizadas pelo ateliê são:<br/>
+                              <span className="pl-3 block font-medium">- Queima de biscoito: aproximadamente 1.000 °C;</span>
+                              <span className="pl-3 block font-medium">- Queima de esmalte e monoqueima: aproximadamente 1.240 °C.</span>
+                            </p>
+                            <p>• Todo forno cerâmico apresenta pequenas variações naturais de temperatura entre diferentes regiões da câmara de queima. Essas diferenças são inerentes ao processo cerâmico e não caracterizam falha do equipamento nem responsabilidade do ateliê.</p>
+                            <p>• Caso o cliente deseje acompanhamento por cones pirométricos, deverá solicitá-lo previamente. Os cones são cobrados por unidade utilizada, e o serviço de acompanhamento e leitura possui cobrança adicional.</p>
+                            <p>• Peças destinadas à queima de esmalte passam por avaliação técnica quanto à compatibilidade da argila, esmalte e temperatura de queima. O ateliê poderá recusar peças que apresentem risco ao forno ou às demais peças da fornada.</p>
+                            <p>• Caso o esmalte escorra e provoque danos às prateleiras, placas, suportes ou demais componentes do forno, o cliente será responsável pelos custos de limpeza, reparo ou substituição dos materiais danificados.</p>
+                            <p>• O processo cerâmico envolve riscos inerentes, como trincas, rachaduras, empenamentos, deformações, bolhas, pinholes, variações de cor, diferenças de textura e outras alterações decorrentes da secagem, da formulação dos esmaltes, da argila ou da compatibilidade entre materiais. Tais ocorrências fazem parte da natureza da cerâmica e não caracterizam responsabilidade do ateliê.</p>
+                            <p>• O Ateliê Ollaria Cerâmica é responsável pela correta condução do processo de queima, não podendo garantir resultados estéticos ou técnicos decorrentes da construção da peça, da qualidade da argila, da aplicação de esmaltes ou da compatibilidade entre os materiais utilizados pelo cliente.</p>
+                          </div>
+                        )}
+                      </div>
+
                       {copiedMessage && (
                         <p className="text-center text-xs text-[#25D366] font-semibold">{copiedMessage}</p>
                       )}
@@ -1922,7 +2555,7 @@ export default function App() {
                 </div>
 
                 {/* Kiln Shelf Auto-Optimizer Visualizer */}
-                <KilnOptimizer piecesList={piecesList} />
+                <KilnOptimizer piecesList={piecesList} podeSobreporBiscoito={podeSobreporBiscoito} />
 
                 {/* Gemini Technical opinion card when loaded */}
                 {geminiRelatorio && (
@@ -2356,6 +2989,266 @@ export default function App() {
             </div>
 
 
+          </div>
+        </div>
+      )}
+
+      {/* Import PDF/Text Modal */}
+      {showImportPdfModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="bg-white rounded-2xl border border-[#E2DED0] shadow-2xl p-6 max-w-xl w-full space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start border-b border-[#E2DED0] pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 bg-[#C15E3F]/10 text-[#C15E3F] rounded-lg">
+                    <FileUp className="w-5 h-5" />
+                  </span>
+                  <h3 className="text-lg font-bold text-[#4A443F]">Importar Pedido ou Colar Orçamento</h3>
+                </div>
+                <p className="text-xs text-[#8A847C] mt-1">
+                  Recarregue automaticamente todas as peças e dimensões colando a mensagem do WhatsApp/texto ou enviando o PDF de um orçamento anterior.
+                </p>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowImportPdfModal(false);
+                  setParsedPiecesPreview([]);
+                  setPdfParseError(null);
+                  setPdfParseSuccessMsg(null);
+                  setPastedText('');
+                }}
+                className="text-[#8A847C] hover:text-[#4A443F] p-1 rounded-lg hover:bg-[#F2EFE9] transition-colors cursor-pointer"
+                id="btn-close-pdf-import-modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Navigation Tabs (Text / PDF) */}
+            <div className="flex bg-[#FAF9F6] p-1 rounded-xl border border-[#E2DED0]">
+              <button
+                onClick={() => {
+                  setImportTab('text');
+                  setPdfParseError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  importTab === 'text'
+                    ? 'bg-white text-[#C15E3F] shadow-xs border border-[#E2DED0]'
+                    : 'text-[#8A847C] hover:text-[#4A443F]'
+                }`}
+                id="tab-import-text"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Colar Texto / Mensagem</span>
+              </button>
+              <button
+                onClick={() => {
+                  setImportTab('pdf');
+                  setPdfParseError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  importTab === 'pdf'
+                    ? 'bg-white text-[#C15E3F] shadow-xs border border-[#E2DED0]'
+                    : 'text-[#8A847C] hover:text-[#4A443F]'
+                }`}
+                id="tab-import-pdf"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Subir Arquivo PDF</span>
+              </button>
+            </div>
+
+            {/* Tab 1: Paste Text Content */}
+            {importTab === 'text' && (
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-[#4A443F]">
+                    Cole a mensagem copiada do orçamento anterior:
+                  </label>
+                  <button
+                    onClick={handlePasteFromClipboard}
+                    className="text-xs font-bold text-[#C15E3F] hover:underline flex items-center gap-1 cursor-pointer"
+                    id="btn-paste-clipboard"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Colar Automaticamente</span>
+                  </button>
+                </div>
+
+                <textarea
+                  value={pastedText}
+                  onChange={(e) => {
+                    setPastedText(e.target.value);
+                    setPdfParseError(null);
+                  }}
+                  placeholder="Cole aqui a mensagem inteira do WhatsApp ou do resumo (ex: 1. Vaso - Medidas: 20x15x15 cm...)"
+                  className="w-full h-36 p-3 text-xs bg-[#FAF9F6] border border-[#E2DED0] rounded-xl focus:outline-none focus:border-[#C15E3F] font-mono"
+                  id="textarea-paste-quote"
+                />
+
+                <button
+                  onClick={() => handleProcessTextMessage(pastedText)}
+                  disabled={isParsingPdf || !pastedText.trim()}
+                  className="w-full py-2.5 bg-[#C15E3F] text-white rounded-xl text-xs font-bold shadow-md hover:bg-[#a64e32] transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                  id="btn-parse-text-quote"
+                >
+                  {isParsingPdf ? (
+                    <>
+                      <Sparkles className="w-4 h-4 animate-spin" />
+                      <span>Interpretando Texto e Extraindo Peças...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span>Interpretar Texto e Carregar Peças</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Tab 2: Dropzone / PDF File Picker */}
+            {importTab === 'pdf' && (
+              <div className="space-y-4">
+                <label 
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleProcessPdfFile(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  className={`border-2 border-dashed rounded-2xl p-6 text-center flex flex-col items-center justify-center cursor-pointer transition-all ${
+                    isParsingPdf ? 'border-[#C15E3F] bg-[#FDF7F5] animate-pulse' : 'border-[#E2DED0] bg-[#FAF9F6] hover:border-[#C15E3F] hover:bg-[#FDF7F5]/50'
+                  }`}
+                  id="pdf-dropzone-label"
+                >
+                  <input 
+                    type="file" 
+                    accept=".pdf" 
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleProcessPdfFile(e.target.files[0]);
+                      }
+                    }}
+                    className="hidden" 
+                    id="pdf-upload-input"
+                  />
+
+                  {isParsingPdf ? (
+                    <div className="py-2 flex flex-col items-center gap-2">
+                      <Sparkles className="w-8 h-8 text-[#C15E3F] animate-spin" />
+                      <p className="text-xs font-bold text-[#4A443F]">Lendo e extraindo itens do PDF...</p>
+                      <p className="text-[11px] text-[#8A847C]">Analisando metadados digitais e especificações técnicas.</p>
+                    </div>
+                  ) : (
+                    <div className="py-2 flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-full bg-[#F2EFE9] flex items-center justify-center text-[#C15E3F]">
+                        <Upload className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-[#4A443F]">Clique para selecionar ou arraste o PDF aqui</p>
+                        <p className="text-[10px] text-[#8A847C] mt-0.5">Suporta orçamentos gerados pelo Ollaria Ateliê (.pdf)</p>
+                      </div>
+                    </div>
+                  )}
+                </label>
+              </div>
+            )}
+
+            {/* Error and Success Feedback Messages */}
+            {pdfParseError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold" id="pdf-parse-error-box">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{pdfParseError}</span>
+              </div>
+            )}
+
+            {pdfParseSuccessMsg && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-xl flex items-center gap-2 text-xs text-green-800 font-semibold" id="pdf-parse-success-box">
+                <CheckCircle className="w-4 h-4 shrink-0 text-green-600" />
+                <span>{pdfParseSuccessMsg}</span>
+              </div>
+            )}
+
+            {/* Preview List of extracted items */}
+            {parsedPiecesPreview.length > 0 && (
+              <div className="space-y-3 pt-2 border-t border-[#E2DED0]">
+                <div className="flex justify-between items-center">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-[#4A443F]">
+                    Peças Identificadas ({parsedPiecesPreview.length})
+                  </h4>
+                  <button 
+                    onClick={() => {
+                      if (selectedPreviewIds.size === parsedPiecesPreview.length) {
+                        setSelectedPreviewIds(new Set());
+                      } else {
+                        setSelectedPreviewIds(new Set(parsedPiecesPreview.map(p => p.id)));
+                      }
+                    }}
+                    className="text-[11px] font-semibold text-[#C15E3F] hover:underline cursor-pointer"
+                    id="btn-toggle-all-preview-pieces"
+                  >
+                    {selectedPreviewIds.size === parsedPiecesPreview.length ? 'Desmarcar Todas' : 'Marcar Todas'}
+                  </button>
+                </div>
+
+                <div className="max-h-[220px] overflow-y-auto space-y-2 pr-1 border border-[#E2DED0] rounded-xl p-2 bg-[#FAF9F6]">
+                  {parsedPiecesPreview.map((item) => (
+                    <div 
+                      key={item.id}
+                      onClick={() => toggleSelectPreviewPiece(item.id)}
+                      className={`p-2.5 rounded-lg border text-xs flex items-center justify-between cursor-pointer transition-all ${
+                        selectedPreviewIds.has(item.id) 
+                          ? 'bg-white border-[#C15E3F] shadow-sm' 
+                          : 'bg-[#F2EFE9]/60 border-[#E2DED0] opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <input 
+                          type="checkbox"
+                          checked={selectedPreviewIds.has(item.id)}
+                          onChange={() => toggleSelectPreviewPiece(item.id)}
+                          className="rounded text-[#C15E3F] focus:ring-[#C15E3F] cursor-pointer"
+                        />
+                        <div>
+                          <p className="font-bold text-[#4A443F]">{item.nome}</p>
+                          <p className="text-[10px] text-[#8A847C]">
+                            Medidas: {item.altura}x{item.largura}x{item.profundidade}cm • Tipo: {item.tipo.toUpperCase()}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] bg-[#F2EFE9] text-[#4A443F] px-2 py-0.5 rounded font-semibold uppercase">
+                        {item.metodo.replace('_', ' ')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Actions to confirm import */}
+                <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                  <button 
+                    onClick={() => handleConfirmImport('append')}
+                    disabled={selectedPreviewIds.size === 0}
+                    className="flex-1 py-2.5 bg-[#C15E3F] text-white rounded-xl text-xs font-bold shadow-md hover:bg-[#a64e32] transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                    id="btn-confirm-import-append"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Adicionar {selectedPreviewIds.size} {selectedPreviewIds.size === 1 ? 'Peça' : 'Peças'} ao Orçamento
+                  </button>
+                  {piecesList.length > 0 && (
+                    <button 
+                      onClick={() => handleConfirmImport('replace')}
+                      disabled={selectedPreviewIds.size === 0}
+                      className="py-2.5 px-4 bg-[#4A443F] text-white rounded-xl text-xs font-bold hover:bg-[#38332f] transition-colors disabled:opacity-50 cursor-pointer"
+                      id="btn-confirm-import-replace"
+                    >
+                      Substituir Peças Atuais
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

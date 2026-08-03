@@ -4,6 +4,7 @@ import { PieceItem, FiringType } from '../types';
 
 interface KilnOptimizerProps {
   piecesList: PieceItem[];
+  podeSobreporBiscoito?: boolean;
 }
 
 export interface PackedPiece {
@@ -39,17 +40,17 @@ export interface SupportColumn {
   r: number; // radius (cm)
 }
 
-const SHELF_DIAMETER = 50; // cm de diâmetro útil de espaço plano (diâmetro real de 53cm facetado)
-const SHELF_RADIUS = SHELF_DIAMETER / 2; // 25 cm de raio de espaço útil plano
+const SHELF_DIAMETER = 53; // cm de diâmetro útil de espaço da prateleira
+const SHELF_RADIUS = SHELF_DIAMETER / 2; // 26.5 cm de raio
 const COLUMN_RADIUS = 1.75; // Colunas com diâmetro de 3,5cm (raio de 1,75cm)
 const SAFETY_PADDING_ESMALTE = 0.5; // Espaçamento de segurança para esmalte: 5mm (entre 5mm e 1cm)
 const SAFETY_PADDING_BISCOITO = 0.1; // Espaçamento mínimo para biscoito: 1mm (permite contato e empilhamento)
 
-// Layout das 3 colunas de sustentação ajustadas para o raio plano útil (raio de 20cm da coluna até o centro)
+// Layout das 3 colunas de sustentação ajustadas para o raio útil (raio de 21cm da coluna até o centro)
 const SUPPORT_COLUMNS: SupportColumn[] = [
-  { x: 0, y: 20, r: COLUMN_RADIUS }, // Coluna superior
-  { x: -17.32, y: -10, r: COLUMN_RADIUS }, // Coluna inferior esquerda (20 * cos(210º), 20 * sin(210º))
-  { x: 17.32, y: -10, r: COLUMN_RADIUS }, // Coluna inferior direita (20 * cos(330º), 20 * sin(330º))
+  { x: 0, y: 21, r: COLUMN_RADIUS }, // Coluna superior
+  { x: -18.18, y: -10.5, r: COLUMN_RADIUS }, // Coluna inferior esquerda (21 * cos(210º), 21 * sin(210º))
+  { x: 18.18, y: -10.5, r: COLUMN_RADIUS }, // Coluna inferior direita (21 * cos(330º), 21 * sin(330º))
 ];
 
 // Helper to check if a rectangle fits inside a circle of radius R
@@ -67,8 +68,7 @@ function rectangleFitsInCircle(x: number, y: number, w: number, d: number, R: nu
 
   for (const corner of corners) {
     const distSq = corner.cx * corner.cx + corner.cy * corner.cy;
-    // Since 50cm (radius R=25cm) is already flat useful space inside the physical 53cm shelf,
-    // we only need a very small safety boundary (e.g. 0.2cm) from R to fit maximum pieces.
+    // Small safety boundary (0.2cm) from R to fit maximum pieces safely
     if (distSq > (R - 0.2) * (R - 0.2)) {
       return false;
     }
@@ -186,7 +186,8 @@ function getCandidatePositionsForPiece(
 }
 
 // 2D Bin Packing algorithm for circular shelves
-export function packPiecesOnShelves(pieces: PieceItem[]): ShelfLevel[] {
+export function packPiecesOnShelves(pieces: PieceItem[], options?: { podeSobreporBiscoito?: boolean }): ShelfLevel[] {
+  const podeSobreporBiscoito = options?.podeSobreporBiscoito !== false;
   const shelves: ShelfLevel[] = [];
   
   // Separate into separate firing runs (different temperatures/types)
@@ -220,8 +221,8 @@ export function packPiecesOnShelves(pieces: PieceItem[]): ShelfLevel[] {
 
       let placed = false;
 
-      // 1. FOR BISCOITO: Try to stack this piece on an existing piece first (since biscoito can be stacked!)
-      if (tipo === 'biscoito') {
+      // 1. FOR BISCOITO: Try to stack this piece on an existing piece first (since biscoito can be stacked, if allowed)
+      if (tipo === 'biscoito' && podeSobreporBiscoito) {
         for (const shelf of shelves.filter(s => s.tipo === 'biscoito')) {
           const potentialBase = shelf.pieces.find(p => 
             !p.stackedOnId && 
@@ -508,14 +509,14 @@ function tryPlacePieceOnShelf(piece: PieceItem, shelf: ShelfLevel, color: string
   return null;
 }
 
-export const KilnOptimizer: React.FC<KilnOptimizerProps> = ({ piecesList }) => {
+export const KilnOptimizer: React.FC<KilnOptimizerProps> = ({ piecesList, podeSobreporBiscoito = true }) => {
   const [activeShelfId, setActiveShelfId] = useState<string | null>(null);
   const [showExplanation, setShowExplanation] = useState<boolean>(false);
 
   // Compute shelf packing
   const shelves = useMemo(() => {
-    return packPiecesOnShelves(piecesList);
-  }, [piecesList]);
+    return packPiecesOnShelves(piecesList, { podeSobreporBiscoito });
+  }, [piecesList, podeSobreporBiscoito]);
 
   // Set default active shelf
   React.useEffect(() => {
@@ -559,7 +560,7 @@ export const KilnOptimizer: React.FC<KilnOptimizerProps> = ({ piecesList }) => {
           </p>
           <ul className="list-disc pl-4 space-y-2 text-[#4A443F]/90 text-[11.5px] leading-relaxed">
             <li><strong>Separação de Temperatura:</strong> Peças de Biscoito (1000ºC) e Esmalte (1240ºC) são agrupadas separadamente por razões técnicas.</li>
-            <li><strong>Espaço Útil Reais (50 cm):</strong> A prateleira tem 53 cm de diâmetro externo total (facetada). O sistema calcula a arrumação segura considerando a área plana útil de <strong>50 cm de diâmetro</strong> (marcada em tracejado vermelho).</li>
+            <li><strong>Espaço Útil de Prateleira (53 cm):</strong> O sistema calcula a arrumação otimizada considerando a dimensão de até <strong>53 cm de largura e profundidade</strong> nas prateleiras do forno.</li>
             <li><strong>Colunas de Sustentação (3,5 cm):</strong> Reservamos o espaço exato das 3 colunas de sustentação de 3,5 cm de largura (em cinza), impedindo colisão com as peças.</li>
             <li><strong>Comportamento por Tipo de Queima:</strong>
               <ul className="list-circle pl-5 mt-1 space-y-1 text-[11px] text-[#6E675F]">
