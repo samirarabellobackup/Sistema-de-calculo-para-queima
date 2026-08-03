@@ -12,7 +12,7 @@ export interface PieceDimensions {
 export interface TechnicalDetails {
   nacionalidadeMassa: string;
   marcaMassa: string;
-  tempMaximaQueima: number;
+  tempMaximaQueima?: number;
   // For esmalte:
   tipoEsmalte?: 'reagente' | 'estavel' | 'mate' | 'acetinado' | 'brilho' | '';
   marcaEsmalte?: string;

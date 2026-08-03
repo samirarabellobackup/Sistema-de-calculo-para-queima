@@ -13,6 +13,7 @@ import {
   LogOut, 
   LogIn, 
   CheckCircle, 
+  Check, 
   AlertTriangle, 
   ShieldAlert, 
   Sparkles, 
@@ -218,6 +219,15 @@ export default function App() {
     }
   }, [altura, tipoQueima, metodoQueima, metodoQueimaEsmalte]);
 
+  // Abrir e tornar obrigatória a Ficha Técnica para Esmalte, Monoqueima e Ambas
+  const isGlazeOrMono = tipoQueima === 'esmalte' || tipoQueima === 'monoqueima' || tipoQueima === 'ambas';
+
+  useEffect(() => {
+    if (isGlazeOrMono) {
+      setIncluirDetalhes(true);
+    }
+  }, [tipoQueima, isGlazeOrMono]);
+
   // Calculate price of individual piece based on studio rules
   const calculatePiecePrice = (
     type: FiringType,
@@ -285,6 +295,23 @@ export default function App() {
   };
 
   // Dimension warnings
+  const isFornadaInteira = useMemo(() => {
+    if (tipoQueima === 'ambas') {
+      return metodoQueima === 'fornada_inteira' && metodoQueimaEsmalte === 'fornada_inteira';
+    }
+    if (tipoQueima === 'esmalte') {
+      return metodoQueimaEsmalte === 'fornada_inteira';
+    }
+    if (tipoQueima === 'terceira_queima') {
+      return true;
+    }
+    return metodoQueima === 'fornada_inteira';
+  }, [tipoQueima, metodoQueima, metodoQueimaEsmalte]);
+
+  const isPartialFornadaInteira = useMemo(() => {
+    return tipoQueima === 'ambas' && (metodoQueima === 'fornada_inteira' || metodoQueimaEsmalte === 'fornada_inteira') && !isFornadaInteira;
+  }, [tipoQueima, metodoQueima, metodoQueimaEsmalte, isFornadaInteira]);
+
   const isTooTall = altura > 60;
   const isTooWide = largura > 48 || profundidade > 48;
   const dimensionError = isTooTall 
@@ -295,41 +322,44 @@ export default function App() {
 
   // Add piece to list
   const handleAddPiece = () => {
-    if (dimensionError) return;
+    if (!isFornadaInteira && dimensionError) return;
 
-    const volumeM3 = (altura * largura * profundidade) / 1000000;
+    const pieceAltura = isFornadaInteira ? 0 : altura;
+    const pieceLargura = isFornadaInteira ? 0 : largura;
+    const pieceProfundidade = isFornadaInteira ? 0 : profundidade;
+
+    const volumeM3 = (pieceAltura * pieceLargura * pieceProfundidade) / 1000000;
 
     if (tipoQueima === 'ambas') {
-      const finalBiscoitoMethod = metodoQueima === 'ajuste_inteligente' ? resolveSmartMethod('biscoito', altura) : metodoQueima;
-      const custoBiscoito = calculatePiecePrice('biscoito', finalBiscoitoMethod, altura, largura, profundidade);
+      const finalBiscoitoMethod = metodoQueima === 'ajuste_inteligente' ? resolveSmartMethod('biscoito', pieceAltura) : metodoQueima;
+      const custoBiscoito = calculatePiecePrice('biscoito', finalBiscoitoMethod, pieceAltura, pieceLargura, pieceProfundidade);
       const pieceBiscoito: PieceItem = {
         id: 'p-' + Date.now() + '-b',
         nome: `${pecaNome.trim() || 'Peça'} (Biscoito)`,
         tipo: 'biscoito',
         metodo: finalBiscoitoMethod as any,
-        altura,
-        largura,
-        profundidade,
+        altura: pieceAltura,
+        largura: pieceLargura,
+        profundidade: pieceProfundidade,
         volumeM3,
         custoCalculado: custoBiscoito,
         incluirDetalhes,
         detalhesTecnicos: incluirDetalhes ? {
           nacionalidadeMassa,
           marcaMassa: marcaMassa.trim() || 'Não informada',
-          tempMaximaQueima,
         } : undefined
       };
 
-      const finalEsmalteMethod = metodoQueimaEsmalte === 'ajuste_inteligente' ? resolveSmartMethod('esmalte', altura) : metodoQueimaEsmalte;
-      const custoEsmalte = calculatePiecePrice('esmalte', finalEsmalteMethod, altura, largura, profundidade);
+      const finalEsmalteMethod = metodoQueimaEsmalte === 'ajuste_inteligente' ? resolveSmartMethod('esmalte', pieceAltura) : metodoQueimaEsmalte;
+      const custoEsmalte = calculatePiecePrice('esmalte', finalEsmalteMethod, pieceAltura, pieceLargura, pieceProfundidade);
       const pieceEsmalte: PieceItem = {
         id: 'p-' + Date.now() + '-e',
         nome: `${pecaNome.trim() || 'Peça'} (Esmalte)`,
         tipo: 'esmalte',
         metodo: finalEsmalteMethod as any,
-        altura,
-        largura,
-        profundidade,
+        altura: pieceAltura,
+        largura: pieceLargura,
+        profundidade: pieceProfundidade,
         volumeM3,
         custoCalculado: custoEsmalte,
         incluirDetalhes,
@@ -347,25 +377,27 @@ export default function App() {
       setPiecesList([...piecesList, pieceBiscoito, pieceEsmalte]);
     } else {
       const activeMethod = tipoQueima === 'esmalte' ? metodoQueimaEsmalte : metodoQueima;
-      const finalMethod = activeMethod === 'ajuste_inteligente' ? resolveSmartMethod(tipoQueima, altura) : activeMethod;
-      const custo = calculatePiecePrice(tipoQueima, finalMethod, altura, largura, profundidade);
+      const finalMethod = activeMethod === 'ajuste_inteligente' ? resolveSmartMethod(tipoQueima, pieceAltura) : activeMethod;
+      const custo = calculatePiecePrice(tipoQueima, finalMethod, pieceAltura, pieceLargura, pieceProfundidade);
+
+      const isGlazeOrMonoSingle = tipoQueima === 'esmalte' || tipoQueima === 'monoqueima';
 
       const newPiece: PieceItem = {
         id: 'p-' + Date.now(),
         nome: pecaNome.trim() || `Peça #${piecesList.length + 1}`,
         tipo: tipoQueima,
         metodo: finalMethod as any,
-        altura,
-        largura,
-        profundidade,
+        altura: pieceAltura,
+        largura: pieceLargura,
+        profundidade: pieceProfundidade,
         volumeM3,
         custoCalculado: custo,
         incluirDetalhes,
         detalhesTecnicos: incluirDetalhes ? {
           nacionalidadeMassa,
           marcaMassa: marcaMassa.trim() || 'Não informada',
-          tempMaximaQueima,
-          ...((tipoQueima === 'esmalte' || tipoQueima === 'monoqueima' || tipoQueima === 'terceira_queima') ? {
+          ...(isGlazeOrMonoSingle ? {
+            tempMaximaQueima,
             tipoEsmalte,
             marcaEsmalte: marcaEsmalte.trim() || 'Estúdio',
             tempMaximaEsmalte,
@@ -1337,7 +1369,7 @@ export default function App() {
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente</option>
                             <option value="compartilhada">Compartilhada (m³)</option>
                             <option value="meia_fornada">Meia Fornada</option>
-                            <option value="fornada_inteira">Fornada Inteira</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 450,00)</option>
                           </select>
                         </div>
                         <div>
@@ -1352,7 +1384,7 @@ export default function App() {
                             <option value="compartilhada">Compartilhada (m³)</option>
                             <option value="reserva_prateleira">Reserva Prateleira</option>
                             <option value="meia_fornada">Meia Fornada</option>
-                            <option value="fornada_inteira">Fornada Inteira</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 540,00)</option>
                           </select>
                         </div>
                       </div>
@@ -1369,12 +1401,19 @@ export default function App() {
                         className="w-full p-2.5 bg-white border border-[#E2DED0] rounded-xl text-sm outline-none focus:border-[#C15E3F]"
                         id="select-firing-method"
                       >
-                        {tipoQueima === 'biscoito' || tipoQueima === 'monoqueima' ? (
+                        {tipoQueima === 'biscoito' ? (
                           <>
                             <option value="ajuste_inteligente">✨ Ajuste Inteligente (Automático)</option>
                             <option value="compartilhada">Compartilhada (Por Volume m³)</option>
                             <option value="meia_fornada">Meia Fornada (Até 30 cm de altura)</option>
-                            <option value="fornada_inteira">Fornada Inteira</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 450,00)</option>
+                          </>
+                        ) : tipoQueima === 'monoqueima' ? (
+                          <>
+                            <option value="ajuste_inteligente">✨ Ajuste Inteligente (Automático)</option>
+                            <option value="compartilhada">Compartilhada (Por Volume m³)</option>
+                            <option value="meia_fornada">Meia Fornada (Até 30 cm de altura)</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 1.000,00)</option>
                           </>
                         ) : tipoQueima === 'esmalte' ? (
                           <>
@@ -1382,11 +1421,11 @@ export default function App() {
                             <option value="compartilhada">Compartilhada (Por Volume m³)</option>
                             <option value="reserva_prateleira">Reserva de Prateleira Inteira</option>
                             <option value="meia_fornada">Meia Fornada (Até 30 cm de altura)</option>
-                            <option value="fornada_inteira">Fornada Inteira</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 540,00)</option>
                           </>
                         ) : (
                           <>
-                            <option value="fornada_inteira">Fornada Inteira (Somente Forno Inteiro)</option>
+                            <option value="fornada_inteira">Fornada Inteira (R$ 540,00 - Somente Forno Inteiro)</option>
                           </>
                         )}
                       </select>
@@ -1435,72 +1474,138 @@ export default function App() {
                     ) : null}
                   </div>
 
-                  <div>
-                    <label className="text-[11px] font-bold uppercase text-[#8A847C] block mb-1.5">Dimensões Máximas (cm)</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="space-y-1">
-                        <span className="text-[10px] text-[#8A847C] block text-center font-bold">Altura</span>
-                        <input 
-                          type="number" 
-                          value={altura || ''}
-                          onChange={(e) => setAltura(Math.max(0, parseFloat(e.target.value) || 0))}
-                          className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
-                          placeholder="cm"
-                          min="1"
-                          id="input-height"
-                        />
+                  {isFornadaInteira ? (
+                    <div className="p-3.5 bg-gradient-to-br from-[#FDF7F5] to-[#F2EFE9] border border-[#C15E3F]/30 rounded-xl text-xs space-y-2.5 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-[#C15E3F] font-bold">
+                          <Check className="w-4 h-4 shrink-0" />
+                          <span>Fornada Inteira Selecionada</span>
+                        </div>
+                        <span className="text-xs font-bold bg-[#C15E3F] text-white px-2.5 py-0.5 rounded-full shadow-2xs">
+                          {tipoQueima === 'ambas' 
+                            ? 'R$ 990,00 Total'
+                            : tipoQueima === 'biscoito' 
+                            ? 'R$ 450,00' 
+                            : tipoQueima === 'esmalte' || tipoQueima === 'terceira_queima'
+                            ? 'R$ 540,00'
+                            : 'R$ 1.000,00'}
+                        </span>
                       </div>
-                      <div className="space-y-1">
-                        <span className="text-[10px] text-[#8A847C] block text-center font-bold">Largura</span>
-                        <input 
-                          type="number" 
-                          value={largura || ''}
-                          onChange={(e) => setLargura(Math.max(0, parseFloat(e.target.value) || 0))}
-                          className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
-                          placeholder="cm"
-                          min="1"
-                          id="input-width"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <span className="text-[10px] text-[#8A847C] block text-center font-bold">Profundidade</span>
-                        <input 
-                          type="number" 
-                          value={profundidade || ''}
-                          onChange={(e) => setProfundidade(Math.max(0, parseFloat(e.target.value) || 0))}
-                          className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
-                          placeholder="cm"
-                          min="1"
-                          id="input-depth"
-                        />
+
+                      <p className="text-[#8A847C] text-[11px] leading-relaxed">
+                        Cobrança referente à capacidade total do forno (195L / 163L úteis). Dimensões individuais das peças ocultadas nesta modalidade.
+                      </p>
+
+                      <div className="bg-white/80 backdrop-blur-xs rounded-lg p-2.5 border border-[#E2DED0]/60 space-y-1.5">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#8A847C] block mb-1">
+                          Valores por Tipo (Fornada Inteira):
+                        </span>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[11px]">
+                          <div className={`p-1.5 rounded flex justify-between items-center border ${tipoQueima === 'biscoito' ? 'bg-[#FDF7F5] border-[#C15E3F] font-bold text-[#C15E3F]' : 'bg-[#FAF9F6] border-[#E2DED0] text-[#4A443F]'}`}>
+                            <span>Biscoito:</span>
+                            <span className="font-mono font-semibold">R$ 450,00</span>
+                          </div>
+                          <div className={`p-1.5 rounded flex justify-between items-center border ${tipoQueima === 'esmalte' ? 'bg-[#FDF7F5] border-[#C15E3F] font-bold text-[#C15E3F]' : 'bg-[#FAF9F6] border-[#E2DED0] text-[#4A443F]'}`}>
+                            <span>Esmalte:</span>
+                            <span className="font-mono font-semibold">R$ 540,00</span>
+                          </div>
+                          <div className={`p-1.5 rounded flex justify-between items-center border ${tipoQueima === 'ambas' ? 'bg-[#FDF7F5] border-[#C15E3F] font-bold text-[#C15E3F]' : 'bg-[#FAF9F6] border-[#E2DED0] text-[#4A443F]'}`}>
+                            <span>Ambas:</span>
+                            <span className="font-mono font-semibold">R$ 990,00</span>
+                          </div>
+                          <div className={`p-1.5 rounded flex justify-between items-center border ${tipoQueima === 'monoqueima' ? 'bg-[#FDF7F5] border-[#C15E3F] font-bold text-[#C15E3F]' : 'bg-[#FAF9F6] border-[#E2DED0] text-[#4A443F]'}`}>
+                            <span>Monoqueima:</span>
+                            <span className="font-mono font-semibold">R$ 1.000,00</span>
+                          </div>
+                          <div className={`p-1.5 rounded flex justify-between items-center border ${tipoQueima === 'terceira_queima' ? 'bg-[#FDF7F5] border-[#C15E3F] font-bold text-[#C15E3F]' : 'bg-[#FAF9F6] border-[#E2DED0] text-[#4A443F]'}`}>
+                            <span>3ª Queima:</span>
+                            <span className="font-mono font-semibold">R$ 540,00</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    {dimensionError && (
-                      <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded-lg flex items-center gap-1.5">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        <span>{dimensionError}</span>
+                  ) : (
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-[#8A847C] block mb-1.5">Dimensões Máximas (cm)</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-[#8A847C] block text-center font-bold">Altura</span>
+                          <input 
+                            type="number" 
+                            value={altura || ''}
+                            onChange={(e) => setAltura(Math.max(0, parseFloat(e.target.value) || 0))}
+                            className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
+                            placeholder="cm"
+                            min="1"
+                            id="input-height"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-[#8A847C] block text-center font-bold">Largura</span>
+                          <input 
+                            type="number" 
+                            value={largura || ''}
+                            onChange={(e) => setLargura(Math.max(0, parseFloat(e.target.value) || 0))}
+                            className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
+                            placeholder="cm"
+                            min="1"
+                            id="input-width"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-[#8A847C] block text-center font-bold">Profundidade</span>
+                          <input 
+                            type="number" 
+                            value={profundidade || ''}
+                            onChange={(e) => setProfundidade(Math.max(0, parseFloat(e.target.value) || 0))}
+                            className="w-full p-2 border border-[#E2DED0] rounded-lg text-sm text-center outline-none focus:border-[#C15E3F]"
+                            placeholder="cm"
+                            min="1"
+                            id="input-depth"
+                          />
+                        </div>
                       </div>
-                    )}
-                  </div>
+                      {isPartialFornadaInteira && (
+                        <p className="mt-1.5 text-[10px] text-[#C15E3F] font-medium">
+                          💡 As dimensões acima serão aplicadas apenas à modalidade com cálculo por volume/prateleira.
+                        </p>
+                      )}
+                      {dimensionError && (
+                        <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded-lg flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>{dimensionError}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Optional Technical details space */}
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
-                    <label className="text-[11px] font-bold uppercase text-[#8A847C] block">Ficha Técnica da Argila/Esmalte</label>
-                    <button 
-                      onClick={() => setIncluirDetalhes(!incluirDetalhes)}
-                      className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold transition-colors cursor-pointer ${incluirDetalhes ? 'bg-[#C15E3F] text-white' : 'bg-[#F2EFE9] text-[#4A443F]'}`}
-                      id="btn-toggle-tech-details"
-                    >
-                      {incluirDetalhes ? 'Ocultar' : 'Habilitar'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <label className="text-[11px] font-bold uppercase text-[#8A847C] block">Ficha Técnica da Argila/Esmalte</label>
+                      {isGlazeOrMono && (
+                        <span className="text-[9px] bg-[#C15E3F]/10 text-[#C15E3F] px-2 py-0.5 rounded-full font-bold uppercase border border-[#C15E3F]/20">
+                          Obrigatório
+                        </span>
+                      )}
+                    </div>
+                    {!isGlazeOrMono && (
+                      <button 
+                        onClick={() => setIncluirDetalhes(!incluirDetalhes)}
+                        className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold transition-colors cursor-pointer ${incluirDetalhes ? 'bg-[#C15E3F] text-white' : 'bg-[#F2EFE9] text-[#4A443F]'}`}
+                        id="btn-toggle-tech-details"
+                      >
+                        {incluirDetalhes ? 'Ocultar' : 'Habilitar'}
+                      </button>
+                    )}
                   </div>
 
                   <div className={`border border-[#E2DED0] rounded-xl p-3 bg-[#FDFDFD] space-y-3 transition-opacity duration-200 ${incluirDetalhes ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
-                        <span className="text-[9px] text-[#8A847C] uppercase font-bold">Origem Argila</span>
+                        <span className="text-[9px] text-[#8A847C] uppercase font-bold">Nacionalidade Argila</span>
                         <select 
                           value={nacionalidadeMassa}
                           onChange={(e) => setNacionalidadeMassa(e.target.value)}
@@ -1512,10 +1617,10 @@ export default function App() {
                         </select>
                       </div>
                       <div>
-                        <span className="text-[9px] text-[#8A847C] uppercase font-bold">Marca Argila</span>
+                        <span className="text-[9px] text-[#8A847C] uppercase font-bold">Fabricante da Argila</span>
                         <input 
                           type="text" 
-                          placeholder="Ex: Pascoal, Cerâmica"
+                          placeholder="Ex: Pascoal, Argilas Brasil"
                           value={marcaMassa}
                           onChange={(e) => setMarcaMassa(e.target.value)}
                           className="w-full p-1 bg-transparent border-b border-[#F0EEE8] text-xs outline-none focus:border-[#C15E3F]"
@@ -1524,20 +1629,20 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div>
-                      <span className="text-[9px] text-[#8A847C] uppercase font-bold block mb-0.5">Temp. Máxima da Argila (ºC)</span>
-                      <input 
-                        type="number" 
-                        value={tempMaximaQueima || ''}
-                        onChange={(e) => setTempMaximaQueima(parseInt(e.target.value) || 0)}
-                        className="w-full p-1 bg-transparent border-b border-[#F0EEE8] text-xs outline-none focus:border-[#C15E3F]"
-                        placeholder="Ex: 1300"
-                        id="input-clay-temp"
-                      />
-                    </div>
-
-                    {(tipoQueima === 'esmalte' || tipoQueima === 'monoqueima' || tipoQueima === 'terceira_queima' || tipoQueima === 'ambas') && (
+                    {isGlazeOrMono && (
                       <>
+                        <div>
+                          <span className="text-[9px] text-[#8A847C] uppercase font-bold block mb-0.5">Temp. Máxima da Argila (ºC)</span>
+                          <input 
+                            type="number" 
+                            value={tempMaximaQueima || ''}
+                            onChange={(e) => setTempMaximaQueima(parseInt(e.target.value) || 0)}
+                            className="w-full p-1 bg-transparent border-b border-[#F0EEE8] text-xs outline-none focus:border-[#C15E3F]"
+                            placeholder="Ex: 1300"
+                            id="input-clay-temp"
+                          />
+                        </div>
+
                         <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#F0EEE8]">
                           <div>
                             <span className="text-[9px] text-[#8A847C] uppercase font-bold">Tipo Esmalte</span>
@@ -1653,7 +1758,9 @@ export default function App() {
                               </span>
                             </div>
                             <p className="text-[11px] text-[#8A847C]">
-                              {p.altura}x{p.largura}x{p.profundidade}cm • {p.metodo.replace('_', ' ')}
+                              {p.metodo === 'fornada_inteira' || (p.altura === 0 && p.largura === 0 && p.profundidade === 0)
+                                ? 'Fornada Inteira (Capacidade total)'
+                                : `${p.altura}x${p.largura}x${p.profundidade}cm • ${p.metodo.replace('_', ' ')}`}
                             </p>
                           </div>
                           <div className="flex items-center gap-3">
