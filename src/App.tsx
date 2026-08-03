@@ -1670,7 +1670,7 @@ export default function App() {
               <div>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <span className="px-2.5 py-1 bg-[#4A443F] text-white text-[10px] rounded uppercase font-extrabold tracking-wider">
-                    PARÂMETROS DA PEÇA
+                    FAÇA SEU ORÇAMENTO
                   </span>
                   <button 
                     onClick={() => setShowImportPdfModal(true)}
@@ -1683,7 +1683,7 @@ export default function App() {
                   </button>
                 </div>
                 <h2 className="text-xl font-bold text-[#4A443F] tracking-tight mb-1">Configurar Nova Peça</h2>
-                <p className="text-xs text-[#8A847C]">Insira as dimensões exatas de fabricação (incluindo alças, bicos, pés e saliências).</p>
+                <p className="text-xs text-[#8A847C]">Atenção, Insira as dimensões exatas de cada peça (incluindo alças, bicos, pés e saliências), considerando: altura, largura e ou comprimento mais saliente .</p>
               </div>
 
               {/* Step 1: Name and Firing Type Selection */}
